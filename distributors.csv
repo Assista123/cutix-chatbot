@@ -1,0 +1,39 @@
+id,state,place,dealer,address,phones,unverified_phones,notes
+D01,Abia,Aba,A.N. Atueyi Nig. Enterprises,"86 Hospital Road, 206 Faulks Road, Aba, Abia State",08035756204; 08032511900,,
+D02,Abia,Aba,Ikeagu & Sons Electrical,"206 Faulks Road, Aba, Abia State",08092097218,,
+D03,Abia,Aba,Nzegwu & Sons Electrical,"18 Aba Road, Aba, Abia State",08037065821,,
+D04,Ebonyi,Abakaliki,CVC Electricals,"Lot 2, Shop 19/20 Margrethe Umahi Int'l Mkt, Abakaliki; also Lot A, Shop 19 Margrethe Umahi Int'l Mkt and 96 Afikpo Road, Abakaliki, Ebonyi State",08034496505; 08036665895,,Source lists two addresses
+D05,FCT,Abuja,Chibros Iyke Enterprise Ltd.,"Peace Plaza along Nyanya Jukweyi Road, Abuja",08037958058,,
+D06,FCT,Abuja,Delins International Company,"Zone A1, Shop 249, Dei-Dei International Building Materials Market, Abuja FCT",08034311620,,
+D07,Bayelsa,Yenagoa,Appointed Time Building Materials Enterprises,"Appointed Time Building, Kilometres 9/10 Isaac Boro Expressway, Yenuzuege, Yenagoa, Bayelsa State",08027233616; 08036726360,,
+D08,Delta,Asaba,Otutu Resources Improvement,"9 Dennis Osadebe Way, Asaba, Delta State",07037804931,,
+D09,Edo,Benin City,Ben. Bros Electrical Stores Nig. Ltd,"62B Akpakpava Street, Benin City, Edo State",08037256137; 08052254009,,
+D10,Edo,Benin City,Infinity Logistics Electricals,"14B Igbesamwan Street, Benin City, Edo State",07059869248; 07034626276,,
+D11,Enugu,Enugu,ADC Moore Electrical,"139A Nike Lake Road, opp. Timber Abakpa, Enugu State",08037866355,,
+D12,Enugu,Enugu,Chinedum Electrical Solutions,"A31 Shop 16, 17 & 18, Golden Bricks Plaza, opp. Ugwuoba Plaza, Ugwuaji Building Material Mkt., Block 40B, No. 11 Kenyetta Mkt, Uwani, Enugu State",08037739372,,"Dealer name is cut off in the source (""Nwa Ngwo... Home of Electricals"")"
+D13,Enugu,Enugu,Alhaji Lawal & Sons Electrical,"Nwa Jesus Electrical & Electronics Plaza, No. 5 Holy Ghost Road, P&T Ziks Avenue, Enugu State",08036664784; 08035411138,,
+D14,Enugu,Enugu,S. I. Orakwe & Bros,"Block 45, No. 5 Kenyatta Mkt, Uwani, Enugu State; also Line A6, Shop 17-19, Enugu South Int'l Building Material Mkt, Ugwuaji, Enugu State",08036712431,,Source lists two addresses
+D15,Plateau,Jos,Nwa Jesus Electrical,"62/10 Bauchi Road, Jos, Plateau State",08035043836,,
+D16,Plateau,Jos,Dennison Pete Electrical Merchant Ltd.,"34 Rwang Pam Street, Jos, Plateau State",08034092917; 09095665762,,
+D17,Plateau,Jos,St. Anthony Electrical Ltd,"41 Rwang Pam Street, Jos, Plateau State",08037976527; 08035867045,,
+D18,Kano,Kano,Brighter Electrical Homes,"12 Galadima, Off France Road, Sabon-Gari, Kano",08033149695; 08065274289; 07067724331,,
+D19,Katsina,Katsina,O & O General Enterprises,"Shop No. 4, Kaita House, beside Dan-Marna Filling Station, Kofar-Kaura, Katsina State",08034446191; 08075854444; 08096844444,,
+D20,Lagos,Alaba,Don Hill Electrical,"Shop E19, Alaba International Market, Lagos",08097443770,,
+D21,Lagos,Alaba,Mark-Tovu Global,"Shop E26, Alaba Electrical Market, Lagos State",07032681955,,
+D22,Lagos,Oshodi/Ikeja,M.I. Uka & Sons Nig,"7 Brown Street, Oshodi Market, Ikeja, Lagos State",08034043067,,
+D23,Lagos,Lekki,Test-Tech Electrical & Allied Limited,"Eputu, Lekki-Epe Expressway, Lagos",08062765449,,
+D24,Borno,Maiduguri,Wasili Electrical Installation,"57 Fezzan Ward, Maiduguri, Borno State",08033300275,,
+D25,Anambra,Nnewi,F.O Anaka Nig. Ltd,"22/23 Dalgo Estate, Onitsha Road, Nnewi, Anambra State",08063756182; 08066003600,,
+D26,Anambra,Obosi,Dollymart Industry Nig. Ltd,"Zone One, Block 1, Shop No. 12, Central Line, Electrical Dealers International Market, Obosi, Anambra State",08082980099,0803668114; 080100200130,Two of three phone numbers in the source are malformed; do not give them out
+D27,Anambra,Obosi,E.U Nwankwo & Sons Electrical Enterprises,"Electrical International Market, Obosi, Anambra State",08033523636; 08037466843,,
+D28,Anambra,Obosi,Pax-O Multi Links,"Zone 2 Block G11, New Blessed Line Electrical Dealers Market, Obosi, Anambra State",08063848154; 07019898226,,
+D29,Imo,Owerri,MB Tonex Elite Concepts,"154 Wetheral Road, by Anokwuru Street, opposite St. Mulumba Catholic Church, Owerri Municipal, Imo State",08036981364; 08037024938; 07082335114,,
+D30,Imo,Owerri,Olisakwe Enterprises Nig. Ltd,"7 Osina Street, Owerri, Imo State",08035527166,,
+D31,Rivers,Port Harcourt,C. Emmax International Ltd,"316A Stadium Road, Port Harcourt; also 15 Okija Street, Mile 1 Diobu, Port Harcourt, Rivers State",08033097220; 08033414663; 08033368919,,Source lists two addresses
+D32,Rivers,Port Harcourt,Linco Nigeria Limited,"15 Umuoji Street, Mile One Diobu; 20 Ebera/Orazi Road, Mile 4 Rumuepirikom, Port Harcourt, Rivers State",08063478572; 08038282282,,Source lists two addresses
+D33,Akwa Ibom,Uyo,A.B. Commercial Stores (Nig.),"81/91 Akah Road, Uyo, Akwa Ibom State",08023219428; 08025896737; 08037510612,,
+D34,Akwa Ibom,Uyo,Esset Golden Electricals,"4 Ring Road, Uyo, Akwa Ibom State",08172068551; 08172068552,,
+D35,Akwa Ibom,Uyo,Mosmann Electrical Company,"142 Udo Umana Street, by Obio Imoh Traffic Light, Uyo, Akwa Ibom State",08023338787; 08095671815,,
+D36,Akwa Ibom,Uyo,Ogbuefi Electrical/Electronics Company,"No 61 Akah Road, Uyo, Akwa Ibom State",08023352092,,
+D37,Akwa Ibom,Uyo,Sunny Electrical Stores (Nig),"70 Abak Road, Uyo, Akwa Ibom State",08035510575; 08082499247,,
+D38,Akwa Ibom,Uyo,T-Z Electrical International Limited,"IBB Way, opposite Library, Uyo, Akwa Ibom State",08037524514; 08023188914,,
