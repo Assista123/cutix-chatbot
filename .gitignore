@@ -1,0 +1,6 @@
+.env
+logs/
+usage.json
+__pycache__/
+test_results_*.md
+*.pyc
