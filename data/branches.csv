@@ -1,0 +1,12 @@
+id,branch,city,state,address,phones,email,verified
+B01,Head Office / Factory,Nnewi,Anambra,"17 Osita Onyejianya St, Umuanuka Otolo, Nnewi",07046236426; 08130010813; 07026445769,info@cutixplc.com.ng,0
+B02,Aba,Aba,Abia,"27 St. Michael Road, Aba",09065034969,aba@cutixplc.com.ng,0
+B03,Abuja 1,Abuja,FCT,"Shop R239, Gudu Electrical Market",08036755246,abuja1@cutixplc.com.ng,0
+B04,Abuja 2,Abuja,FCT,"Shop B4, 109/110 Dei-Dei Int'l Building Material Market",09023394294; 08133031662,abujaoffice2@cutixplc.com.ng,0
+B05,Enugu,Enugu,Enugu,"Suite B16, Elim Plaza near Oakland Hotel, Ebeano Tunnel Road",08160597414; 09069943744,enugu@cutixplc.com.ng,0
+B06,Lagos 1,Lagos,Lagos,"17 Olutosin Ajayi Street / Martins Adegboyega St, Ajao Estate, Isolo",08134551103; 08147356929,lagos@cutixplc.com.ng,0
+B07,Lagos 2,Lagos,Lagos,"Suite 18, Elegushi Modern Plaza, Jakande Roundabout, Lekki-Epe Expressway",09085372230; 08062312663,lagos2@cutixplc.com.ng,0
+B08,Alaba (Lagos 3),Lagos,Lagos,"Shop A51, Century Mall, Alaba Int'l Market",09032821581; 08140713787,lagos3@cutixplc.com.ng,0
+B09,Obosi,Obosi,Anambra,"Shop 7 & 8, God is Good Plaza, Electrical Dealers Int'l Market, Obosi",08132492717; 09067757132,obosi@cutixplc.com.ng,0
+B10,Port Harcourt,Port Harcourt,Rivers,18 Dr Aranye Okilo Drive (Railway Close),08180097256; 08160659919,portharcourt@cutixplc.com.ng,0
+B11,Uyo,Uyo,Akwa Ibom,"41 Ikot-Ekpene Road, Uyo",07043798268,uyo@cutixplc.com.ng,0

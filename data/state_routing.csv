@@ -1,0 +1,38 @@
+state,zone,nearest_branch_id,second_branch_id,far,note,nearest_label,second_label
+Abia,South-East,B02,B09,0,,Aba,Obosi
+Adamawa,North-East,B03,,1,,Abuja 1,
+Akwa Ibom,South-South,B11,B10,0,,Uyo,Port Harcourt
+Anambra,South-East,B09,B01,0,,Obosi,Head Office / Factory
+Bauchi,North-East,B03,,1,,Abuja 1,
+Bayelsa,South-South,B10,,0,,Port Harcourt,
+Benue,North-Central,B03,B05,0,CONFIRM: Makurdi side may be closer to Enugu,Abuja 1,Enugu
+Borno,North-East,B03,,1,,Abuja 1,
+Cross River,South-South,B11,B10,0,,Uyo,Port Harcourt
+Delta,South-South,B09,B10,0,CHANGED from Port Harcourt - CONFIRM: Asaba is next to Onitsha/Obosi; Warri side may suit Port Harcourt,Obosi,Port Harcourt
+Ebonyi,South-East,B05,B02,0,,Enugu,Aba
+Edo,South-South,B09,B06,0,CHANGED from Port Harcourt - CONFIRM: Benin City is much closer to Obosi/Nnewi,Obosi,Lagos 1
+Ekiti,South-West,B06,,0,,Lagos 1,
+Enugu,South-East,B05,B09,0,,Enugu,Obosi
+FCT,North-Central,B03,B04,0,,Abuja 1,Abuja 2
+Gombe,North-East,B03,,1,,Abuja 1,
+Imo,South-East,B09,B02,0,,Obosi,Aba
+Jigawa,North-West,B03,,1,,Abuja 1,
+Kaduna,North-West,B03,B04,0,,Abuja 1,Abuja 2
+Kano,North-West,B03,B04,1,Kano has approved dealers,Abuja 1,Abuja 2
+Katsina,North-West,B03,,1,Katsina has an approved dealer,Abuja 1,
+Kebbi,North-West,B03,,1,,Abuja 1,
+Kogi,North-Central,B03,B05,0,,Abuja 1,Enugu
+Kwara,North-Central,B06,B03,0,CHANGED (order swapped) - CONFIRM: Ilorin is likely closer to Lagos 1,Lagos 1,Abuja 1
+Lagos,South-West,B06,B07,0,Place-level overrides in places.csv choose Lagos 1/2/3,Lagos 1,Lagos 2
+Nasarawa,North-Central,B03,B04,0,,Abuja 1,Abuja 2
+Niger,North-Central,B03,B04,0,,Abuja 1,Abuja 2
+Ogun,South-West,B06,B08,0,,Lagos 1,Alaba (Lagos 3)
+Ondo,South-West,B06,,0,,Lagos 1,
+Osun,South-West,B06,,0,,Lagos 1,
+Oyo,South-West,B06,,0,,Lagos 1,
+Plateau,North-Central,B03,B04,1,Jos has approved dealers,Abuja 1,Abuja 2
+Rivers,South-South,B10,,0,,Port Harcourt,
+Sokoto,North-West,B03,,1,,Abuja 1,
+Taraba,North-East,B03,,1,,Abuja 1,
+Yobe,North-East,B03,,1,,Abuja 1,
+Zamfara,North-West,B03,,1,,Abuja 1,
