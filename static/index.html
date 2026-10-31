@@ -31,9 +31,11 @@ header small{color:#b9b9bf;font-size:12px}
 .typing i:nth-child(2){animation-delay:.15s}.typing i:nth-child(3){animation-delay:.3s}
 @keyframes b{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
 .actions{display:flex;gap:8px;padding:8px 14px 0;background:var(--bg)}
-.actions a{flex:1;text-align:center;font-size:14px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);text-decoration:none}
+.actions a,.actions button{flex:1;text-align:center;font-size:14px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);text-decoration:none;cursor:pointer;font:inherit}
 .actions a.wa{border-color:var(--line);color:var(--muted);opacity:.75}
 .actions a.wa.ready{border-color:#1fa855;color:#1fa855;opacity:1;font-weight:700;background:#f0faf4}
+.actions button.quote{border-color:var(--red);color:var(--red)}
+.actions button.quote:hover{background:var(--red);color:#fff}
 form{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg)}
 textarea{flex:1;resize:none;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:12px;padding:10px 12px;font:inherit;max-height:110px}
 button.send{background:var(--red);color:#fff;border:0;border-radius:12px;padding:0 18px;font-weight:700;font-size:15px;cursor:pointer}
@@ -43,89 +45,243 @@ button.send:disabled{background:#999;cursor:default}
 #gate div{background:var(--card);border-radius:14px;padding:20px;width:100%;max-width:340px}
 #gate input{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);font:inherit;background:var(--bg);color:var(--text);margin:10px 0}
 #gate button{width:100%;padding:10px;border:0;border-radius:10px;background:var(--red);color:#fff;font-weight:700}
+.newchat{font-size:12px;color:var(--muted);background:none;border:none;cursor:pointer;text-decoration:underline;padding:4px 0}
 </style>
 </head>
 <body>
 <div id="app">
   <header>
     <div class="badge"><img src="/static/logo.png" alt="Cutix PLC" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'CUTIX PLC'}))"></div>
-    <div><h1>Cutix Assistant</h1><small>Demo built from public information</small></div>
+    <div style="flex:1"><h1>Cutix Assistant</h1><small>Demo built from public information</small></div>
+    <button class="newchat" id="newchat" type="button">New chat</button>
   </header>
   <div class="note">Demo only, not an official Cutix service. Conversations may be reviewed to improve it.</div>
   <div id="msgs" aria-live="polite"></div>
-  <div class="actions"><a id="wa" class="wa" target="_blank" rel="noopener">WhatsApp Cutix</a><a id="quote" target="_blank" rel="noopener">Request a quote</a></div>
-  <form id="f"><textarea id="t" rows="1" maxlength="600" placeholder="Ask about Cutix cables…" aria-label="Your question"></textarea><button class="send" id="s" type="submit">Send</button></form>
+  <div class="actions">
+    <a id="wa" class="wa" target="_blank" rel="noopener noreferrer">WhatsApp Cutix</a>
+    <button id="quote" class="quote" type="button">Request a quote</button>
+  </div>
+  <form id="f">
+    <textarea id="t" rows="1" maxlength="600" placeholder="Ask about Cutix cables…" aria-label="Your question" enterkeyhint="send"></textarea>
+    <button class="send" id="s" type="submit">Send</button>
+  </form>
   <div class="foot"><span id="left"></span> <span id="powered"></span></div>
 </div>
 <div id="gate"><div><b>Enter access code</b><input id="code" autocomplete="off"><button id="codeBtn">Continue</button><small id="codeErr" style="color:#d71920"></small></div></div>
 <script>
 const $=id=>document.getElementById(id);
-let cfg={},history=[],busy=false;
-const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
-let session=store.get('cutix_sid')||((window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Math.random()).slice(2)+Date.now());
-store.set('cutix_sid',session);
-let code=store.get('cutix_code')||'';
-const chipsList=["What does Cutix make?","Where can I buy Cutix in Jos?","I need cables for my shop in Port Harcourt","What is HFFR cable?"];
+let cfg={}, history=[], busy=false;
+const store={
+  get(k){try{return localStorage.getItem(k)}catch(e){return null}},
+  set(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+};
+
+function newSession(){
+  return (window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Math.random()).slice(2)+Date.now();
+}
+let session = store.get('cutix_sid') || newSession();
+store.set('cutix_sid', session);
+let code = store.get('cutix_code') || '';
+
+const isTouch = window.matchMedia('(pointer:coarse)').matches;
+const chipsList = ["What does Cutix make?","Where can I buy Cutix in Jos?","I need cables for my shop in Port Harcourt","What is HFFR cable?"];
 
 function fmt(t){
-  let s=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
-  s=s.replace(/([\w.+-]+@[\w-]+\.[\w.-]*\w)/g,'<a href="mailto:$1">$1</a>');
-  s=s.replace(/(\+234[\s\d()]{9,}\d)/g,m=>'<a href="tel:+'+m.replace(/\D/g,'')+'">'+m+'</a>');
-  let out='',inList=false;
-  for(const ln of s.split('\n')){
-    const m=ln.match(/^\s*[-•*]\s+(.*)$/);
-    if(m){if(!inList){out+='<ul>';inList=true}out+='<li>'+m[1]+'</li>'}
-    else{if(inList){out+='</ul>';inList=false}if(ln.trim())out+='<p>'+ln+'</p>'}
+  // Safe link building – only http/https, no visitor-message auto-linking of arbitrary text
+  let s = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  s = s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  s = s.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, m => {
+    try {
+      const u = new URL(m);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        return `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`;
+      }
+    } catch(e){}
+    return m;
+  });
+  s = s.replace(/([\w.+-]+@[\w-]+\.[\w.-]*\w)/g,'<a href="mailto:$1">$1</a>');
+  s = s.replace(/(\+234[\s\d()]{9,}\d)/g, m => '<a href="tel:+'+m.replace(/\D/g,'')+'">'+m+'</a>');
+  let out='', inList=false;
+  for (const ln of s.split('\n')) {
+    const m = ln.match(/^\s*[-•*]\s+(.*)$/);
+    if (m) {
+      if (!inList) { out += '<ul>'; inList = true; }
+      out += '<li>' + m[1] + '</li>';
+    } else {
+      if (inList) { out += '</ul>'; inList = false; }
+      if (ln.trim()) out += '<p>' + ln + '</p>';
+    }
   }
-  if(inList)out+='</ul>';return out;
+  if (inList) out += '</ul>';
+  return out;
 }
-function add(cls,html){const d=document.createElement('div');d.className='m '+cls;d.innerHTML=html;$('msgs').appendChild(d);$('msgs').scrollTop=1e9;return d}
-function addBot(t){return add('bot',fmt(t))}
-function typing(){return add('bot','<span class="typing"><i></i><i></i><i></i></span>')}
 
-async function send(text){
-  text=text.trim();if(!text||busy)return;
-  document.querySelectorAll('.chips').forEach(c=>c.remove());
-  add('me',fmt(text));busy=true;$('s').disabled=true;$('t').value='';
-  const ty=typing();
-  try{
-    const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,message:text,history:history.slice(-4),code})});
-    const j=await r.json().catch(()=>({}));
+function add(cls, html) {
+  const d = document.createElement('div');
+  d.className = 'm ' + cls;
+  d.innerHTML = html;
+  $('msgs').appendChild(d);
+  $('msgs').scrollTop = 1e9;
+  return d;
+}
+function addBot(t){ return add('bot', fmt(t)); }
+function typing(){ return add('bot', '<span class="typing"><i></i><i></i><i></i></span>'); }
+
+function resetTextarea(){
+  const t = $('t');
+  t.value = '';
+  t.style.height = 'auto';
+}
+
+async function send(text, opts={}) {
+  text = (text || '').trim();
+  if ((!text && !opts.quote_request) || busy) return;
+  document.querySelectorAll('.chips').forEach(c => c.remove());
+  if (text) add('me', fmt(text));
+  busy = true;
+  $('s').disabled = true;
+  resetTextarea();
+  const ty = typing();
+  try {
+    const payload = {
+      session,
+      message: text || '',
+      code,
+      quote_request: !!opts.quote_request
+    };
+    const r = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json().catch(() => ({}));
     ty.remove();
-    if(r.status===401){showGate('That code did not work.');addBot('Please enter the access code to continue.')}
-    else if(!r.ok){addBot(j.error||'Sorry, something went wrong. Please try again.')}
-    else{
-      addBot(j.reply);history.push({role:'user',content:text},{role:'assistant',content:j.reply});
-      if(typeof j.remaining==='number'&&j.remaining<=5)$('left').textContent=j.remaining+' message'+(j.remaining===1?'':'s')+' left in this demo. ';
-      // Soft-hide: only promote WhatsApp button after a fully qualified lead (Need+Qty+Location)
-      if(j.qualified && j.whatsapp_url){
-        $('wa').href=j.whatsapp_url;
-        $('wa').textContent='Continue on WhatsApp';
+    if (r.status === 401) {
+      showGate('That code did not work.');
+      addBot('Please enter the access code to continue.');
+    } else if (!r.ok) {
+      addBot(j.error || 'Sorry, something went wrong. Please try again.');
+    } else {
+      addBot(j.reply);
+      if (text) history.push({role:'user', content:text}, {role:'assistant', content:j.reply});
+      if (typeof j.remaining === 'number' && j.remaining <= 5) {
+        $('left').textContent = j.remaining + ' message' + (j.remaining === 1 ? '' : 's') + ' left in this demo. ';
+      }
+      if (j.qualified && j.whatsapp_url) {
+        $('wa').href = j.whatsapp_url;
+        $('wa').textContent = 'Continue on WhatsApp';
         $('wa').classList.add('ready');
+        // mark that WhatsApp was prepared (for "additional" messages later)
+        store.set('cutix_wa_tapped', '1');
       }
     }
-  }catch(e){ty.remove();addBot('I could not reach the server. Please check your connection and try again.')}
-  busy=false;$('s').disabled=false;$('t').focus();
+  } catch(e) {
+    ty.remove();
+    addBot('I could not reach the server. Please check your connection and try again.');
+  }
+  busy = false;
+  $('s').disabled = false;
+  $('t').focus();
 }
-function showGate(err){$('gate').style.display='flex';$('codeErr').textContent=err||'';$('code').focus()}
-$('codeBtn').onclick=()=>{code=$('code').value.trim();store.set('cutix_code',code);$('gate').style.display='none'};
-$('f').addEventListener('submit',e=>{e.preventDefault();send($('t').value)});
-$('t').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send($('t').value)}});
-$('t').addEventListener('input',e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,110)+'px'});
 
-(async function init(){
-  try{cfg=await (await fetch('/config.json')).json()}catch(e){}
-  $('wa').href=cfg.whatsapp||'#';$('quote').href=cfg.quoteUrl||'#';
-  const em=cfg.contactEmail||'';const pb=(cfg.poweredBy||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-  $('powered').innerHTML=(pb?pb+' · ':'')+(em?'Demo contact: <a href="mailto:'+em+'">'+em+'</a>':'');
-  addBot("Hello! I can help with Cutix cables, finding where to buy, and getting a quote. What do you need?");
-  const c=document.createElement('div');c.className='chips';
-  chipsList.forEach(q=>{const b=document.createElement('button');b.type='button';b.className='chip';b.textContent=q;b.onclick=()=>send(q);c.appendChild(b)});
-  $('msgs').appendChild(c);
-  if(cfg.accessCodeRequired&&!code)showGate('');
-})();
+function showGate(err) {
+  $('gate').style.display = 'flex';
+  $('codeErr').textContent = err || '';
+  $('code').focus();
+}
+
+$('codeBtn').onclick = () => {
+  code = $('code').value.trim();
+  store.set('cutix_code', code);
+  $('gate').style.display = 'none';
+};
+
+$('f').addEventListener('submit', e => {
+  e.preventDefault();
+  send($('t').value);
+});
+
+$('t').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    // On touch devices Enter inserts a newline; Send button sends
+    if (isTouch) return;
+    if (!e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      send($('t').value);
+    }
+  }
+});
+
+$('t').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px';
+});
+
+$('quote').onclick = () => {
+  send('', {quote_request: true});
+};
+
+$('newchat').onclick = () => {
+  session = newSession();
+  store.set('cutix_sid', session);
+  store.set('cutix_wa_tapped', '');
+  history = [];
+  $('msgs').innerHTML = '';
+  $('wa').href = cfg.whatsapp || '#';
+  $('wa').textContent = 'WhatsApp Cutix';
+  $('wa').classList.remove('ready');
+  $('left').textContent = '';
+  startChat();
+};
+
+async function startChat() {
+  try {
+    cfg = await (await fetch('/config.json')).json();
+  } catch(e) {}
+  $('wa').href = cfg.whatsapp || '#';
+  const em = cfg.contactEmail || '';
+  const pb = (cfg.poweredBy || '').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  $('powered').innerHTML = (pb ? pb + ' · ' : '') + (em ? 'Demo contact: <a href="mailto:' + em + '">' + em + '</a>' : '');
+
+  // Try to restore previous turns for short-lived session
+  let restored = false;
+  try {
+    const r = await fetch('/session', {headers: {'X-Session-Id': session}});
+    if (r.ok) {
+      const j = await r.json();
+      if (j.turns && j.turns.length) {
+        j.turns.forEach(t => {
+          add(t.role === 'user' ? 'me' : 'bot', fmt(t.content));
+          history.push(t);
+        });
+        restored = true;
+        if (j.qualified) {
+          $('wa').classList.add('ready');
+          $('wa').textContent = 'Continue on WhatsApp';
+        }
+      }
+    }
+  } catch(e) {}
+
+  if (!restored) {
+    addBot("Hello! I can help with Cutix cables, finding where to buy, and getting a quote. What do you need?");
+    const c = document.createElement('div');
+    c.className = 'chips';
+    chipsList.forEach(q => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip';
+      b.textContent = q;
+      b.onclick = () => send(q);
+      c.appendChild(b);
+    });
+    $('msgs').appendChild(c);
+  }
+
+  if (cfg.accessCodeRequired && !code) showGate('');
+}
+
+startChat();
 </script>
 </body>
 </html>
