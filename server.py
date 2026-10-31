@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
-"""Cutix demo chatbot server v0.4 — lead-generation restructure.
-Standard library only: no installs needed.
-
-Run:  python server.py   then open http://localhost:8000
-Settings live in the .env file (copy .env.example to .env).
-
-V2 changes:
-- SQLite (WAL) primary logging + JSONL archival
-- Server-side qualification state machine
-- Lead fields (name, need, quantity, location) + routing outcome
-- History window default trimmed to 4
-- Gentle lead-gen prompt (v0.4)
-- Groq/Llama stack noted for later (use Gemini free tier for demo)
 """
+Cutix demo chatbot – rewritten lead-generation version
+Standard library only.
+"""
+
 import csv
 import datetime
 import hashlib
@@ -20,13 +11,13 @@ import json
 import os
 import re
 import sqlite3
-import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -36,8 +27,8 @@ LOGS = ROOT / "logs"
 FALLBACK = ("Sorry, I can't answer that right now. Please reach the Cutix team: "
             "+234 704 623 6426 (call or WhatsApp) or info@cutixplc.com.ng.")
 
-# Qualification stages
-STAGES = ("answering", "intent_detected", "qualifying", "lead_captured", "routed")
+# Stages
+STAGES = ("answering", "intent_detected", "qualifying", "awaiting_name", "lead_captured", "routed")
 
 
 def load_env():
@@ -66,30 +57,32 @@ def env_int(name, default):
         return default
 
 
-# ----------------------------------------------------------------------------
-# Knowledge: build the context that is placed inside the system prompt
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Knowledge
+# ---------------------------------------------------------------------------
 META_COLS = {"product", "type_code", "voltage", "standard", "application",
              "conditions", "source", "verification", "flags"}
 
 
 def build_context():
     parts = []
-    kb = (DATA / "knowledge_base.md").read_text(encoding="utf-8")
-    # Everything from section 13 onward is internal working notes, not for the bot.
-    cut = kb.find("## 13. Pages still not captured")
-    if cut != -1:
-        kb = kb[:cut]
-    parts.append("=== CUTIX KNOWLEDGE BASE ===\n" + kb.strip())
+    kb_path = DATA / "knowledge_base.md"
+    if kb_path.exists():
+        kb = kb_path.read_text(encoding="utf-8")
+        cut = kb.find("## 13. Pages still not captured")
+        if cut != -1:
+            kb = kb[:cut]
+        parts.append("=== CUTIX KNOWLEDGE BASE ===\n" + kb.strip())
 
     dist = DATA / "distributors.csv"
     if dist.exists():
         rows = list(csv.DictReader(dist.open(encoding="utf-8")))
         lines = ["state | place | dealer | address | phones"]
         for r in rows:
-            lines.append(" | ".join([r["state"], r["place"], r["dealer"], r["address"], r["phones"]]))
-        parts.append("=== APPROVED DISTRIBUTORS AND DEALERS (from Cutix's website; confirm by phone) ===\n"
-                     + "\n".join(lines))
+            lines.append(" | ".join([r.get("state", ""), r.get("place", ""),
+                                     r.get("dealer", ""), r.get("address", ""),
+                                     r.get("phones", "")]))
+        parts.append("=== APPROVED DISTRIBUTORS AND DEALERS ===\n" + "\n".join(lines))
 
     for spec in sorted(DATA.glob("spec_*.csv")):
         rows = list(csv.DictReader(spec.open(encoding="utf-8")))
@@ -97,18 +90,19 @@ def build_context():
             continue
         r0 = rows[0]
         cols = [c for c in rows[0].keys() if c not in META_COLS]
-        head = (f"TABLE: {r0['product']} ({r0['type_code']}, {r0['voltage']}); standard: {r0['standard']}; "
-                f"use: {r0['application']}; conditions: {r0['conditions']}; source: {r0['source']}. "
-                "Quote values only as 'per Cutix's catalogue' and add the electrician/engineer disclaimer.")
+        head = (f"TABLE: {r0.get('product','')} ({r0.get('type_code','')}, {r0.get('voltage','')}); "
+                f"standard: {r0.get('standard','')}; use: {r0.get('application','')}. "
+                "Quote values only as 'per Cutix's catalogue'.")
         lines = [head, " | ".join(cols)]
         for r in rows:
-            lines.append(" | ".join(r[c] for c in cols))
+            lines.append(" | ".join(r.get(c, "") for c in cols))
         parts.append("=== CATALOGUE TABLE ===\n" + "\n".join(lines))
     return "\n\n".join(parts)
 
 
 def build_system_prompt():
-    tpl = (DATA / "system_prompt.md").read_text(encoding="utf-8")
+    tpl_path = DATA / "system_prompt.md"
+    tpl = tpl_path.read_text(encoding="utf-8") if tpl_path.exists() else ""
     ctx = build_context()
     if "{{retrieved_chunks}}" in tpl:
         return tpl.replace("{{retrieved_chunks}}", ctx), ctx
@@ -132,9 +126,9 @@ ALLOWED_NUMBERS = {norm_phone(m) for m in PHONE_RE.findall(CONTEXT_TEXT)}
 ALLOWED_EMAILS = {m.lower() for m in EMAIL_RE.findall(CONTEXT_TEXT)}
 
 
-# ----------------------------------------------------------------------------
-# Model providers (Groq via openai-compat path is ready for later; Gemini for demo)
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Model providers
+# ---------------------------------------------------------------------------
 class LLMError(Exception):
     pass
 
@@ -165,8 +159,8 @@ def clean_messages(msgs):
 def call_gemini(system, msgs):
     key = env("GEMINI_API_KEY")
     if not key:
-        raise LLMError("GEMINI_API_KEY is empty in .env")
-    model = env("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        raise LLMError("GEMINI_API_KEY is empty")
+    model = env("GEMINI_MODEL", "gemini-2.0-flash")
     base = env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
     contents = [{"role": "user" if m["role"] == "user" else "model",
                  "parts": [{"text": m["content"]}]} for m in msgs]
@@ -181,39 +175,18 @@ def call_gemini(system, msgs):
         raise LLMError(f"Gemini HTTP {status}: {str(j)[:400]}")
     cands = j.get("candidates") or []
     if not cands:
-        raise LLMError("Gemini returned no candidates: " + str(j.get("promptFeedback"))[:300])
+        raise LLMError("Gemini returned no candidates")
     parts = (cands[0].get("content") or {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
     if not text.strip():
-        raise LLMError("Gemini empty reply, finishReason=" + str(cands[0].get("finishReason")))
-    return text.strip()
-
-
-def call_claude(system, msgs):
-    key = env("ANTHROPIC_API_KEY")
-    if not key:
-        raise LLMError("ANTHROPIC_API_KEY is empty in .env")
-    payload = {"model": env("CLAUDE_MODEL", "claude-haiku-5-5"), "max_tokens": 700,
-               "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-               "messages": msgs}
-    status, j = http_json("https://api.anthropic.com/v1/messages", payload,
-                          {"x-api-key": key, "anthropic-version": "2023-06-01"})
-    if status != 200:
-        raise LLMError(f"Claude HTTP {status}: {str(j)[:400]}")
-    text = "".join(b.get("text", "") for b in j.get("content", []) if b.get("type") == "text")
-    if not text.strip():
-        raise LLMError("Claude empty reply")
+        raise LLMError("Gemini empty reply")
     return text.strip()
 
 
 def call_openai_compat(system, msgs):
-    """Works for DeepSeek, Groq (OpenAI-compatible), and other OpenAI-style APIs.
-    For Groq later: OPENAI_BASE_URL=https://api.groq.com/openai/v1
-                    OPENAI_MODEL=llama-3.1-8b-instant
-    """
     key = env("OPENAI_API_KEY")
     if not key:
-        raise LLMError("OPENAI_API_KEY is empty in .env")
+        raise LLMError("OPENAI_API_KEY is empty")
     base = env("OPENAI_BASE_URL", "https://api.deepseek.com").rstrip("/")
     payload = {"model": env("OPENAI_MODEL", "deepseek-chat"), "temperature": 0.2, "max_tokens": 700,
                "messages": [{"role": "system", "content": system}] + msgs}
@@ -223,28 +196,31 @@ def call_openai_compat(system, msgs):
     try:
         return j["choices"][0]["message"]["content"].strip()
     except Exception:
-        raise LLMError("Unexpected reply shape: " + str(j)[:300])
+        raise LLMError("Unexpected reply shape")
 
 
 def call_mock(system, msgs):
     q = msgs[-1]["content"]
-    return (f"[Demo mode: no AI model is connected.] You asked: \"{q[:120]}\". "
-            "For real answers, add your model key in the .env file. "
-            "Meanwhile, the Cutix team: +234 704 623 6426 or info@cutixplc.com.ng.")
+    return (f"[Demo mode] You asked: \"{q[:120]}\". "
+            "Add a real key in the environment. "
+            "Cutix team: +234 704 623 6426 or info@cutixplc.com.ng.")
 
 
-PROVIDERS = {"gemini": call_gemini, "claude": call_claude, "openai": call_openai_compat, "mock": call_mock}
+PROVIDERS = {
+    "gemini": call_gemini,
+    "openai": call_openai_compat,
+    "mock": call_mock,
+}
 
 
-# ----------------------------------------------------------------------------
-# Pacing and usage caps
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Throttling & usage
+# ---------------------------------------------------------------------------
 _rl_lock = threading.Lock()
 _calls = []
 
 
 def throttle(max_wait=12):
-    """Keep model calls under RPM_LIMIT per minute. Returns False if we had to give up."""
     rpm = env_int("RPM_LIMIT", 12)
     deadline = time.time() + max_wait
     while True:
@@ -279,19 +255,19 @@ def _load_usage():
     return {"date": _today(), "total": 0, "sessions": {}, "ips": {}}
 
 
-def check_and_count(session, ip_hash):
-    """Returns (ok, message, remaining_for_session)."""
+def check_and_reserve(session, ip_hash):
+    """Reserve a slot. Returns (ok, message, remaining). Caller must refund on failure."""
     per_session = env_int("MAX_MSGS_PER_SESSION", 20)
     per_ip = env_int("MAX_MSGS_PER_IP", 40)
     daily = env_int("DAILY_CAP", 300)
     with _use_lock:
         u = _load_usage()
         if u["total"] >= daily:
-            return False, "The demo has reached its daily limit. Please try again tomorrow, or contact the Cutix team on +234 704 623 6426.", 0
+            return False, "The demo has reached its daily limit. Please try again tomorrow or contact Cutix on +234 704 623 6426.", 0
         s = u["sessions"].get(session, 0)
         i = u["ips"].get(ip_hash, 0)
         if s >= per_session or i >= per_ip:
-            return False, "You've reached the message limit for this demo. For more help, contact the Cutix team on +234 704 623 6426 (call or WhatsApp).", 0
+            return False, "You've reached the message limit for this demo. Contact the Cutix team on +234 704 623 6426.", 0
         u["total"] += 1
         u["sessions"][session] = s + 1
         u["ips"][ip_hash] = i + 1
@@ -299,9 +275,20 @@ def check_and_count(session, ip_hash):
         return True, "", per_session - (s + 1)
 
 
-# ----------------------------------------------------------------------------
-# SQLite logging + qualification state machine
-# ----------------------------------------------------------------------------
+def refund(session, ip_hash):
+    with _use_lock:
+        u = _load_usage()
+        u["total"] = max(0, u.get("total", 0) - 1)
+        if session in u["sessions"]:
+            u["sessions"][session] = max(0, u["sessions"][session] - 1)
+        if ip_hash in u["ips"]:
+            u["ips"][ip_hash] = max(0, u["ips"][ip_hash] - 1)
+        USAGE_FILE.write_text(json.dumps(u), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 DB_PATH = LOGS / "chats.db"
 _db_lock = threading.Lock()
 
@@ -328,7 +315,8 @@ def init_db():
                 lead_quantity TEXT,
                 lead_location TEXT,
                 routed_to TEXT,
-                message_count INTEGER NOT NULL DEFAULT 0
+                message_count INTEGER NOT NULL DEFAULT 0,
+                whatsapp_tapped INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -342,8 +330,6 @@ def init_db():
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             );
             CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conversation_id);
-            CREATE INDEX IF NOT EXISTS idx_conv_stage ON conversations(stage);
-            CREATE INDEX IF NOT EXISTS idx_conv_qualified ON conversations(qualified);
         """)
         conn.commit()
         conn.close()
@@ -358,12 +344,22 @@ def get_db():
 
 def get_or_create_conversation(session_id):
     now = _utcnow()
+    ttl_min = env_int("SESSION_TTL_MINUTES", 45)
     with _db_lock:
         conn = get_db()
         try:
             row = conn.execute("SELECT * FROM conversations WHERE id = ?", (session_id,)).fetchone()
             if row:
-                return dict(row)
+                last = datetime.datetime.fromisoformat(row["last_active"])
+                age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds() / 60
+                if age > ttl_min:
+                    # expired – start fresh
+                    conn.execute("DELETE FROM turns WHERE conversation_id = ?", (session_id,))
+                    conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
+                    conn.commit()
+                else:
+                    return dict(row)
+
             conn.execute(
                 "INSERT INTO conversations (id, started_at, last_active, stage) VALUES (?, ?, ?, ?)",
                 (session_id, now, now, "answering")
@@ -373,7 +369,8 @@ def get_or_create_conversation(session_id):
                 "id": session_id, "started_at": now, "last_active": now,
                 "stage": "answering", "qualified": 0,
                 "lead_name": None, "lead_need": None, "lead_quantity": None,
-                "lead_location": None, "routed_to": None, "message_count": 0
+                "lead_location": None, "routed_to": None, "message_count": 0,
+                "whatsapp_tapped": 0
             }
         finally:
             conn.close()
@@ -394,7 +391,7 @@ def update_conversation(session_id, **fields):
             conn.close()
 
 
-def log_turn_db(conversation_id, role, content, ms=None, provider=None, error=None):
+def log_turn(conversation_id, role, content, ms=None, provider=None, error=None):
     with _db_lock:
         conn = get_db()
         try:
@@ -412,32 +409,53 @@ def log_turn_db(conversation_id, role, content, ms=None, provider=None, error=No
             conn.close()
 
 
-def log_turn_jsonl(entry):
-    """Archival JSONL (kept for easy debugging and the original design)."""
-    LOGS.mkdir(exist_ok=True)
-    with (LOGS / "chats.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+def get_recent_turns(conversation_id, limit=6):
+    with _db_lock:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT role, content FROM turns "
+                "WHERE conversation_id = ? AND error IS NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (conversation_id, limit)
+            ).fetchall()
+            return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+        finally:
+            conn.close()
 
 
-# Simple heuristics for stage progression and lead extraction
-# Intent must be a real buying signal, not pure "where can I buy / find dealers"
+# ---------------------------------------------------------------------------
+# Lead extraction (improved)
+# ---------------------------------------------------------------------------
 INTENT_RE = re.compile(
-    r"\b(i\s+need|i\s+want|looking\s+for|i\s+would\s+like|order|quote\s+for|purchase|supply|"
-    r"for\s+my\s+(shop|house|project|site|building|office|warehouse)|"
-    r"how\s+(do|can)\s+i\s+(order|get|buy)\b)",
+    r"\b(i\s+need|i\s+want|looking\s+for|i\s+would\s+like|i'd\s+like|order|quote\s+for|"
+    r"purchase|supply|for\s+my\s+(shop|house|project|site|building|office|warehouse)|"
+    r"how\s+(do|can)\s+i\s+(order|get|buy)|request\s+a\s+quote|get\s+a\s+quote)\b",
     re.I
 )
-# Pure locator questions should not start qualification
+
 LOCATOR_RE = re.compile(
     r"\b(where\s+(can|do|to)\s+i\s+(buy|find|get)|nearest\s+(dealer|branch|distributor)|"
     r"dealers?\s+in|branches?\s+in|where\s+to\s+buy)\b",
     re.I
 )
+
+# Size patterns to strip before looking for quantity
+SIZE_RE = re.compile(r"\b\d+(\.\d+)?\s*mm2?\b", re.I)
+
+# Quantity must have a unit
 QUANTITY_RE = re.compile(
-    r"(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|rolls?|coils?|drums?|pieces?|pcs?|lengths?)?",
+    r"(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b",
     re.I
 )
-LOCATION_HINTS = re.compile(
+
+KNOWN_LOCATIONS = {
+    "lagos", "abuja", "port harcourt", "ph", "kano", "ibadan", "kaduna", "enugu",
+    "onitsha", "aba", "jos", "benin", "warri", "calabar", "uyo", "owerri", "ilorin",
+    "abeokuta", "akure", "asaba", "awka", "nnewi", "fct"
+}
+
+LOCATION_RE = re.compile(
     r"\b(in|at|from|around|near)\s+([A-Za-z][A-Za-z\s-]{2,30})|"
     r"\b(Lagos|Abuja|Port\s*Harcourt|PH|Kano|Ibadan|Kaduna|Enugu|Onitsha|Aba|Jos|"
     r"Benin|Warri|Calabar|Uyo|Owerri|Ilorin|Abeokuta|Akure|Asaba|Awka|Nnewi|"
@@ -447,66 +465,98 @@ LOCATION_HINTS = re.compile(
     r"Taraba|Yobe|Zamfara|FCT)\b",
     re.I
 )
+
 NAME_RE = re.compile(
     r"(?:my\s+name\s+is|i\s+am|i'?m|this\s+is|name['\s:]+)\s*([A-Za-z][A-Za-z\s'-]{1,40})",
     re.I
 )
-HANDOFF_RE = re.compile(
-    r"(got\s+it|i.?ll\s+pass|pass\s+this|hand\s*off|reach\s+them\s+directly|"
-    r"whatsapp.*704\s*623\s*6426|quote\s+form|speak\s+with\s+the\s+cutix\s+team)",
-    re.I
-)
 
 
-def extract_lead_fields(text, current):
-    """Update lead fields from user text using simple patterns. Never overwrite with empty."""
-    updated = dict(current)
-    # Name
+def extract_quantity(text):
+    """Strip cable sizes first, then require a unit. Reject pure phone numbers."""
+    cleaned = SIZE_RE.sub(" ", text)
+    matches = QUANTITY_RE.findall(cleaned)
+    for num, unit in matches:
+        digits = re.sub(r"\D", "", num)
+        if len(digits) >= 10:          # phone-like
+            continue
+        return f"{num}{unit}".strip()
+    return None
+
+
+def extract_location(text):
+    m = LOCATION_RE.search(text)
+    if not m:
+        return None
+    loc = (m.group(2) or m.group(0)).strip()
+    loc = re.sub(r"^(in|at|from|around|near)\s+", "", loc, flags=re.I).strip()
+    if len(loc) < 3:
+        return None
+    # prefer known places
+    low = loc.lower()
+    for known in KNOWN_LOCATIONS:
+        if known in low:
+            return known.title() if known != "ph" else "Port Harcourt"
+    return loc[:60]
+
+
+def extract_name(text, awaiting=False):
     m = NAME_RE.search(text)
-    if m and not updated.get("lead_name"):
+    if m:
         name = m.group(1).strip()[:60]
-        if len(name) > 1 and not any(w in name.lower() for w in ("need", "want", "looking", "order")):
-            updated["lead_name"] = name
-    # Quantity
-    m = QUANTITY_RE.search(text)
-    if m and not updated.get("lead_quantity"):
-        qty = m.group(0).strip()[:40]
-        # Avoid tiny numbers that are just cable sizes (e.g. 2.5mm)
-        if not re.match(r"^\d+(\.\d+)?\s*mm", qty, re.I):
-            updated["lead_quantity"] = qty
-    # Location
-    m = LOCATION_HINTS.search(text)
-    if m and not updated.get("lead_location"):
-        loc = (m.group(2) or m.group(0)).strip()[:60]
-        loc = re.sub(r"^(in|at|from|around|near)\s+", "", loc, flags=re.I).strip()
-        if len(loc) > 2:
-            updated["lead_location"] = loc
-    # Need: only from clear buying-intent phrasing, never from pure locator questions
-    if not updated.get("lead_need") and INTENT_RE.search(text) and not LOCATOR_RE.search(text):
-        need_m = re.search(
-            r"(?:i\s+need|i\s+want|looking\s+for|i\s+would\s+like|order|quote\s+for|supply)\s+(.{5,80})",
-            text, re.I
-        )
-        if need_m:
-            updated["lead_need"] = need_m.group(1).strip()[:120]
-        else:
-            # Fallback: take a short clean slice only if it looks like a product request
-            cleaned = re.sub(r"\b(where|can|i|buy|find|dealer|branch)\b", "", text, flags=re.I).strip()
-            if len(cleaned) > 8:
-                updated["lead_need"] = cleaned[:120]
+        if len(name) > 1 and not any(w in name.lower() for w in ("need", "want", "looking", "order", "quote")):
+            return name
+    if awaiting:
+        # short reply with no digits or question mark → treat as name
+        cleaned = text.strip()
+        if (len(cleaned.split()) <= 4 and
+            not re.search(r"\d|\?", cleaned) and
+            cleaned.lower() not in ("no", "skip", "later", "none", "n/a")):
+            return cleaned[:60]
+        if cleaned.lower() in ("no", "skip", "later", "none", "n/a"):
+            return "__declined__"
+    return None
+
+
+def extract_need(text):
+    if not INTENT_RE.search(text) or LOCATOR_RE.search(text):
+        return None
+    m = re.search(
+        r"(?:i\s+need|i\s+want|looking\s+for|i\s+would\s+like|i'd\s+like|order|quote\s+for|supply)\s+(.{5,100})",
+        text, re.I
+    )
+    if m:
+        return m.group(1).strip()[:120]
+    cleaned = re.sub(r"\b(where|can|i|buy|find|dealer|branch)\b", "", text, flags=re.I).strip()
+    if len(cleaned) > 8:
+        return cleaned[:120]
+    return None
+
+
+def extract_lead_fields(text, current, awaiting_name=False):
+    """Latest-wins for every field."""
+    updated = dict(current)
+
+    name = extract_name(text, awaiting=awaiting_name)
+    if name:
+        updated["lead_name"] = None if name == "__declined__" else name
+
+    qty = extract_quantity(text)
+    if qty:
+        updated["lead_quantity"] = qty
+
+    loc = extract_location(text)
+    if loc:
+        updated["lead_location"] = loc
+
+    need = extract_need(text)
+    if need:
+        updated["lead_need"] = need
+
     return updated
 
 
-def advance_stage(conv, user_text, bot_reply):
-    """Progress the qualification state machine.
-
-    Rules (V2 tightened):
-    - Pure locator questions ("where can I buy…") never start qualification.
-    - Intent moves us into qualifying.
-    - A lead is only qualified when ALL THREE are present: Need + Quantity + Location.
-    - Name is preferred but not required for the qualified flag.
-    - Bot hand-off language only moves to 'routed' after the three fields exist.
-    """
+def advance_stage(conv, user_text, bot_reply, quote_request=False):
     stage = conv.get("stage") or "answering"
     fields = {
         "lead_name": conv.get("lead_name"),
@@ -514,34 +564,50 @@ def advance_stage(conv, user_text, bot_reply):
         "lead_quantity": conv.get("lead_quantity"),
         "lead_location": conv.get("lead_location"),
     }
-    fields = extract_lead_fields(user_text, fields)
-    newly_qualified = False
+
+    awaiting = stage == "awaiting_name"
+    fields = extract_lead_fields(user_text, fields, awaiting_name=awaiting)
 
     is_locator = bool(LOCATOR_RE.search(user_text))
-    has_buying_intent = bool(INTENT_RE.search(user_text)) and not is_locator
+    has_intent = bool(INTENT_RE.search(user_text)) and not is_locator
 
-    # Stay in answering for pure locator questions
-    if stage == "answering" and is_locator and not has_buying_intent:
-        pass  # remain answering
-    elif stage == "answering" and has_buying_intent:
+    if quote_request:
+        has_intent = True
+
+    # Stage progression
+    if stage == "answering" and (has_intent or quote_request):
         stage = "intent_detected"
 
-    if stage in ("intent_detected", "qualifying"):
+    if stage in ("intent_detected", "qualifying", "awaiting_name"):
         stage = "qualifying"
 
     has_need = bool(fields.get("lead_need"))
     has_qty = bool(fields.get("lead_quantity"))
     has_loc = bool(fields.get("lead_location"))
-    all_three = has_need and has_qty and has_loc
+    has_name = fields.get("lead_name") is not None   # even declined counts as “handled”
 
-    if stage == "qualifying" and all_three:
+    if stage == "qualifying" and has_need and has_qty and has_loc:
+        if not has_name:
+            stage = "awaiting_name"
+        else:
+            stage = "lead_captured"
+
+    if stage == "awaiting_name" and has_name:
         stage = "lead_captured"
-        newly_qualified = True
 
-    # Only allow routed after we actually have the three fields
     if stage == "lead_captured":
-        if HANDOFF_RE.search(bot_reply or "") or all_three:
-            stage = "routed"
+        stage = "routed"
+
+    # After hand-off, a new clear buying intent starts a fresh lead
+    if stage == "routed" and has_intent and not quote_request:
+        # reset fields except name (keep name if we already have it)
+        fields = {
+            "lead_name": fields.get("lead_name"),
+            "lead_need": fields.get("lead_need") if has_intent else None,
+            "lead_quantity": None,
+            "lead_location": None,
+        }
+        stage = "qualifying"
 
     routed_to = conv.get("routed_to")
     if stage in ("lead_captured", "routed") and not routed_to:
@@ -549,7 +615,7 @@ def advance_stage(conv, user_text, bot_reply):
 
     qualified = 1 if stage in ("lead_captured", "routed") else 0
 
-    updated = {
+    return {
         "stage": stage,
         "qualified": qualified,
         "lead_name": fields.get("lead_name"),
@@ -557,11 +623,10 @@ def advance_stage(conv, user_text, bot_reply):
         "lead_quantity": fields.get("lead_quantity"),
         "lead_location": fields.get("lead_location"),
         "routed_to": routed_to,
-    }
-    return updated, newly_qualified or (qualified and not conv.get("qualified"))
+    }, qualified and not conv.get("qualified")
 
 
-def build_lead_summary(conv):
+def build_lead_summary(conv, additional=False):
     parts = []
     if conv.get("lead_name"):
         parts.append(f"Name: {conv['lead_name']}")
@@ -571,48 +636,86 @@ def build_lead_summary(conv):
         parts.append(f"Qty: {conv['lead_quantity']}")
     if conv.get("lead_location"):
         parts.append(f"Location: {conv['lead_location']}")
-    return " | ".join(parts) if parts else ""
+    body = "\n".join(parts) if parts else ""
+    if additional and body:
+        return "Additional to my earlier message:\n\n" + body
+    return body
 
 
 def build_whatsapp_url(summary=""):
     base = "https://wa.me/2347046236426"
     if summary:
         text = "Hello Cutix, I was speaking with the website assistant.\n\n" + summary
-        return base + "?text=" + urllib.request.quote(text)
-    return base + "?text=" + urllib.request.quote("Hello Cutix")
+        return base + "?text=" + quote(text)
+    return base + "?text=" + quote("Hello Cutix")
 
 
-# ----------------------------------------------------------------------------
-# Answering
-# ----------------------------------------------------------------------------
-def answer(message, history=None, paced=True):
-    """Ask the model. Returns (reply_text, error_text_or_None)."""
+def build_confirmation(conv):
+    """Server-built confirmation message."""
+    bits = []
+    if conv.get("lead_quantity"):
+        bits.append(conv["lead_quantity"])
+    if conv.get("lead_need"):
+        bits.append(conv["lead_need"])
+    if conv.get("lead_location"):
+        bits.append("in " + conv["lead_location"])
+    if not bits:
+        return None
+    msg = "Just to confirm: " + ", ".join(bits) + ". Is that right?"
+    if not conv.get("lead_name"):
+        msg += " And your name?"
+    return msg
+
+
+# ---------------------------------------------------------------------------
+# Answer
+# ---------------------------------------------------------------------------
+def answer(message, history=None, paced=True, lead_state=None):
     provider = env("PROVIDER", "mock").lower()
     fn = PROVIDERS.get(provider)
     if not fn:
         return FALLBACK, f"Unknown PROVIDER '{provider}'"
-    hist_window = env_int("HISTORY_WINDOW", 4)
+
+    hist_window = env_int("HISTORY_WINDOW", 6)
     msgs = []
     for h in (history or [])[-hist_window:]:
         if h.get("role") in ("user", "assistant") and isinstance(h.get("content"), str):
             msgs.append({"role": h["role"], "content": h["content"][:1500]})
     msgs.append({"role": "user", "content": message})
     msgs = clean_messages(msgs)
+
+    system = SYSTEM_PROMPT
+    if lead_state:
+        system += "\n\nCurrent lead state (use for confirmation and summary):\n" + json.dumps(lead_state)
+
     if paced and provider != "mock" and not throttle():
         return "I'm getting a lot of questions right now. Please try again in a few seconds.", "throttled"
     try:
-        return fn(SYSTEM_PROMPT, msgs), None
+        return fn(system, msgs), None
     except LLMError as e:
         return FALLBACK, str(e)
-    except Exception as e:  # network errors, bad JSON, etc.
+    except Exception as e:
         return FALLBACK, f"{type(e).__name__}: {e}"
 
 
-# ----------------------------------------------------------------------------
-# HTTP server
-# ----------------------------------------------------------------------------
+def guard_invented_contacts(text):
+    """Replace reply if it invents a phone or email not in the allowed set."""
+    phones = PHONE_RE.findall(text)
+    emails = EMAIL_RE.findall(text)
+    for p in phones:
+        if norm_phone(p) not in ALLOWED_NUMBERS:
+            return FALLBACK, True
+    for e in emails:
+        if e.lower() not in ALLOWED_EMAILS:
+            return FALLBACK, True
+    return text, False
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CutixDemo/0.4"
+    server_version = "CutixDemo/0.5"
 
     def log_message(self, fmt, *args):
         pass
@@ -632,154 +735,207 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _client_hash(self):
-        ip = self.client_address[0]
-        if env("TRUST_PROXY") == "1":
-            ip = self.headers.get("X-Forwarded-For", ip).split(",")[0].strip()
-        return hashlib.sha256(("cutix-salt" + ip).encode()).hexdigest()[:16]
+    def _ip_hash(self):
+        ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+        return hashlib.sha256(ip.encode()).hexdigest()[:16]
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path = self.path.split("?")[0]
+
         if path in ("/", "/index.html"):
-            return self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+            html = (STATIC / "index.html").read_text(encoding="utf-8")
+            self._send(200, html, "text/html; charset=utf-8")
+            return
+
+        if path.startswith("/static/"):
+            f = STATIC / path[len("/static/"):]
+            if f.exists() and f.is_file():
+                data = f.read_bytes()
+                ctype = "image/png" if f.suffix == ".png" else "application/octet-stream"
+                self._send(200, data, ctype)
+                return
+            self._send(404, "Not found")
+            return
+
         if path == "/config.json":
-            return self._send(200, {
+            cfg = {
+                "whatsapp": "https://wa.me/2347046236426",
+                "contactEmail": env("CONTACT_EMAIL", ""),
+                "poweredBy": env("POWERED_BY", ""),
                 "accessCodeRequired": bool(env("ACCESS_CODE")),
-                "poweredBy": env("POWERED_BY"),
-                "contactEmail": env("CONTACT_EMAIL", "Theassistagroup@gmail.com"),
-                "whatsapp": "https://wa.me/2347046236426?text=" + urllib.request.quote("Hello Cutix"),
-                "quoteUrl": "https://forms.cutixplc.com.ng/sprt9u",
-                "maxPerSession": env_int("MAX_MSGS_PER_SESSION", 20),
-            })
-        if path == "/health":
-            return self._send(200, {
-                "ok": True,
-                "provider": env("PROVIDER", "mock"),
-                "version": "0.4",
-                "db": str(DB_PATH.exists()),
-            })
+            }
+            self._send(200, cfg)
+            return
+
         if path == "/stats":
-            # Simple internal stats for the demo dashboard / review
+            token = env("ADMIN_TOKEN")
+            auth = self.headers.get("Authorization", "")
+            if not token or auth != f"Bearer {token}":
+                self._send(401, {"error": "Unauthorized"})
+                return
             with _db_lock:
                 conn = get_db()
                 try:
-                    total = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
-                    qualified = conn.execute("SELECT COUNT(*) FROM conversations WHERE qualified = 1").fetchone()[0]
-                    by_stage = dict(conn.execute(
-                        "SELECT stage, COUNT(*) FROM conversations GROUP BY stage"
-                    ).fetchall())
-                    recent = [dict(r) for r in conn.execute(
+                    rows = conn.execute(
                         "SELECT id, stage, qualified, lead_name, lead_need, lead_quantity, "
-                        "lead_location, routed_to, message_count, started_at "
-                        "FROM conversations ORDER BY last_active DESC LIMIT 20"
-                    ).fetchall()]
+                        "lead_location, message_count, started_at FROM conversations "
+                        "ORDER BY last_active DESC LIMIT 100"
+                    ).fetchall()
+                    stats = []
+                    for r in rows:
+                        name = r["lead_name"] or ""
+                        if name and " " in name:
+                            name = name.split()[0] + " " + name.split()[-1][0] + "."
+                        stats.append({
+                            "id": r["id"][:8],
+                            "stage": r["stage"],
+                            "qualified": bool(r["qualified"]),
+                            "name": name,
+                            "need": (r["lead_need"] or "")[:40],
+                            "qty": r["lead_quantity"],
+                            "loc": r["lead_location"],
+                            "msgs": r["message_count"],
+                            "started": r["started_at"],
+                        })
+                    self._send(200, {"conversations": stats})
                 finally:
                     conn.close()
-            return self._send(200, {
-                "conversations": total,
-                "qualified_leads": qualified,
-                "qualification_rate": round(100 * qualified / total, 1) if total else 0,
-                "by_stage": by_stage,
-                "recent": recent,
-            })
-        if path.startswith("/static/"):
-            name = path[len("/static/"):]
-            f = (STATIC / name).resolve()
-            if STATIC in f.parents and f.is_file():
-                ctype = {"png": "image/png", "jpg": "image/jpeg", "svg": "image/svg+xml",
-                         "css": "text/css", "js": "text/javascript"}.get(f.suffix[1:], "application/octet-stream")
-                return self._send(200, f.read_bytes(), ctype)
-        return self._send(404, {"error": "Not found"})
+            return
+
+        if path == "/session":
+            # restore chat for short-lived session
+            session = self.headers.get("X-Session-Id") or ""
+            if not session:
+                self._send(400, {"error": "missing session"})
+                return
+            conv = get_or_create_conversation(session)
+            turns = get_recent_turns(session, limit=20)
+            self._send(200, {"stage": conv["stage"], "turns": turns, "qualified": bool(conv["qualified"])})
+            return
+
+        self._send(404, "Not found")
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/chat":
-            return self._send(404, {"error": "Not found"})
+        if self.path != "/chat":
+            self._send(404, "Not found")
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
         try:
-            n = int(self.headers.get("Content-Length", "0"))
-            if n > 20000:
-                return self._send(413, {"error": "Message too large."})
-            body = json.loads(self.rfile.read(n).decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
         except Exception:
-            return self._send(400, {"error": "Bad request."})
+            self._send(400, {"error": "bad json"})
+            return
 
-        code = env("ACCESS_CODE")
-        if code and str(body.get("code", "")) != code:
-            return self._send(401, {"error": "Access code needed."})
+        session = (body.get("session") or "").strip() or "anon"
+        message = (body.get("message") or "").strip()[:600]
+        quote_request = bool(body.get("quote_request"))
+        code = (body.get("code") or "").strip()
+        access = env("ACCESS_CODE")
+        if access and code != access:
+            self._send(401, {"error": "invalid code"})
+            return
 
-        message = str(body.get("message", "")).strip()[:600]
-        if not message:
-            return self._send(400, {"error": "Please type a question."})
-        session = re.sub(r"[^\w-]", "", str(body.get("session", "anon")))[:64] or "anon"
-        history = body.get("history") if isinstance(body.get("history"), list) else []
+        if not message and not quote_request:
+            self._send(400, {"error": "empty message"})
+            return
 
-        ok, msg, remaining = check_and_count(session, self._client_hash())
-        if not ok:
-            return self._send(429, {"error": msg})
-
-        # --- Lead-gen state machine ---
+        ip_hash = self._ip_hash()
         conv = get_or_create_conversation(session)
-        log_turn_db(session, "user", message)
+
+        # Quote button: server asks first question, no model call
+        if quote_request:
+            reply = "Tell me what you need and I'll start your quote. What size and length are you looking for?"
+            log_turn(session, "user", "[quote_request]")
+            log_turn(session, "assistant", reply)
+            update_conversation(session, stage="qualifying")
+            self._send(200, {
+                "reply": reply,
+                "qualified": False,
+                "whatsapp_url": None,
+                "remaining": None,
+            })
+            return
+
+        # Reserve usage slot
+        ok, err_msg, remaining = check_and_reserve(session, ip_hash)
+        if not ok:
+            self._send(429, {"error": err_msg})
+            return
+
+        # Server-side history
+        history = get_recent_turns(session, limit=env_int("HISTORY_WINDOW", 6))
 
         t0 = time.time()
-        reply, err = answer(message, history)
+        lead_state = {
+            "name": conv.get("lead_name"),
+            "need": conv.get("lead_need"),
+            "quantity": conv.get("lead_quantity"),
+            "location": conv.get("lead_location"),
+            "stage": conv.get("stage"),
+        }
+        reply, error = answer(message, history=history, lead_state=lead_state)
         ms = int((time.time() - t0) * 1000)
 
-        log_turn_db(session, "assistant", reply, ms=ms, provider=env("PROVIDER", "mock"), error=err)
+        if error:
+            refund(session, ip_hash)
+            log_turn(session, "user", message)
+            log_turn(session, "assistant", reply, ms=ms, provider=env("PROVIDER"), error=error)
+            self._send(200, {"reply": reply, "qualified": False, "remaining": remaining})
+            return
 
-        # Advance stage & extract lead fields
-        updated, newly_qualified = advance_stage(conv, message, reply)
+        # Guard invented contacts
+        reply, was_replaced = guard_invented_contacts(reply)
+        if was_replaced:
+            error = "invented_contact"
+
+        # Advance stage
+        updated, newly = advance_stage(conv, message, reply, quote_request=False)
         update_conversation(session, **updated)
-        conv.update(updated)
 
-        summary = build_lead_summary(conv)
-        wa_url = build_whatsapp_url(summary) if conv.get("qualified") else build_whatsapp_url()
+        log_turn(session, "user", message)
+        log_turn(session, "assistant", reply, ms=ms, provider=env("PROVIDER"), error=error)
 
-        # Archival JSONL (enriched)
-        log_turn_jsonl({
-            "ts": _utcnow(),
-            "session": session,
-            "q": message,
-            "a": reply,
-            "ms": ms,
-            "provider": env("PROVIDER", "mock"),
-            "error": err,
-            "stage": conv.get("stage"),
-            "qualified": bool(conv.get("qualified")),
-            "lead_name": conv.get("lead_name"),
-            "lead_need": conv.get("lead_need"),
-            "lead_quantity": conv.get("lead_quantity"),
-            "lead_location": conv.get("lead_location"),
-            "routed_to": conv.get("routed_to"),
+        # Confirmation when we just got the three fields
+        if updated["stage"] == "awaiting_name" and not conv.get("lead_name"):
+            conf = build_confirmation(updated)
+            if conf:
+                reply = conf
+
+        whatsapp_url = None
+        if updated["qualified"]:
+            additional = bool(conv.get("whatsapp_tapped"))
+            summary = build_lead_summary(updated, additional=additional)
+            whatsapp_url = build_whatsapp_url(summary)
+
+        self._send(200, {
+            "reply": reply,
+            "qualified": bool(updated["qualified"]),
+            "whatsapp_url": whatsapp_url,
+            "remaining": remaining,
+            "stage": updated["stage"],
         })
 
-        if err:
-            print(f"[model error] {err}", file=sys.stderr)
-
-        resp = {
-            "reply": reply,
-            "remaining": remaining,
-            "stage": conv.get("stage"),
-            "qualified": bool(conv.get("qualified")),
-            "lead_summary": summary or None,
-            "routed_to": conv.get("routed_to"),
-            "whatsapp_url": wa_url,
-        }
-        return self._send(200, resp)
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Id")
+        self.end_headers()
 
 
 def main():
     init_db()
-    host = env("HOST", "127.0.0.1")
+    host = env("HOST", "0.0.0.0")
     port = env_int("PORT", 8000)
-    provider = env("PROVIDER", "mock")
-    print(f"Cutix demo bot v0.4 (lead-gen)  |  model provider: {provider}  |  context ~{len(CONTEXT_TEXT)//4} tokens")
-    print(f"SQLite: {DB_PATH}  |  history window: {env_int('HISTORY_WINDOW', 4)}")
-    if provider == "mock":
-        print("NOTE: running in demo mode (no AI model). Set PROVIDER=gemini and a key in .env.")
-    print("NOTE: Groq/Llama stack is prepared (via openai-compat) but deferred until paid plan.")
-    print(f"Open http://localhost:{port}   (Ctrl+C to stop)")
-    print(f"Stats: http://localhost:{port}/stats")
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    print(f"Cutix chatbot listening on http://{host}:{port}")
+    server = ThreadingHTTPServer((host, port), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down")
+        server.shutdown()
 
 
 if __name__ == "__main__":
