@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cutix demo chatbot – rewritten lead-generation version
+Cutix demo chatbot – lead-generation version with geo-markets & unit conversion
 Standard library only.
 """
 
@@ -27,7 +27,6 @@ LOGS = ROOT / "logs"
 FALLBACK = ("Sorry, I can't answer that right now. Please reach the Cutix team: "
             "+234 704 623 6426 (call or WhatsApp) or info@cutixplc.com.ng.")
 
-# Stages
 STAGES = ("answering", "intent_detected", "qualifying", "awaiting_name", "lead_captured", "routed")
 
 
@@ -124,6 +123,118 @@ def norm_phone(s):
 
 ALLOWED_NUMBERS = {norm_phone(m) for m in PHONE_RE.findall(CONTEXT_TEXT)}
 ALLOWED_EMAILS = {m.lower() for m in EMAIL_RE.findall(CONTEXT_TEXT)}
+
+
+# ---------------------------------------------------------------------------
+# Location / Geo-market
+# ---------------------------------------------------------------------------
+TOWN_TO_STATE = {
+    # South-West
+    "lagos": "Lagos", "ikeja": "Lagos", "surulere": "Lagos", "lekki": "Lagos",
+    "yaba": "Lagos", "ajah": "Lagos", "apapa": "Lagos", "badagry": "Lagos",
+    "ibadan": "Oyo", "abeokuta": "Ogun", "sango": "Ogun", "otof": "Ogun",
+    "akure": "Ondo", "ado ekiti": "Ekiti", "osogbo": "Osun", "ile ife": "Osun",
+    # South-East
+    "onitsha": "Anambra", "awka": "Anambra", "nnewi": "Anambra",
+    "enugu": "Enugu", "nsukka": "Enugu", "aba": "Abia", "umuahia": "Abia",
+    "owerri": "Imo", "orlu": "Imo", "abakaliki": "Ebonyi",
+    # South-South
+    "port harcourt": "Rivers", "ph": "Rivers", "warri": "Delta", "asaba": "Delta",
+    "benin": "Edo", "benin city": "Edo", "calabar": "Cross River", "uyo": "Akwa Ibom",
+    "yenagoa": "Bayelsa",
+    # North-Central
+    "abuja": "FCT", "fct": "FCT", "garki": "FCT", "wuse": "FCT", "maitama": "FCT",
+    "jos": "Plateau", "minna": "Niger", "ilorin": "Kwara", "lafia": "Nasarawa",
+    "lokoja": "Kogi", "makurdi": "Benue",
+    # North-West
+    "kano": "Kano", "kaduna": "Kaduna", "zaria": "Kaduna", "katsina": "Katsina",
+    "sokoto": "Sokoto", "birnin kebbi": "Kebbi", "gusau": "Zamfara", "dutse": "Jigawa",
+    # North-East
+    "maiduguri": "Borno", "yola": "Adamawa", "jalingo": "Taraba", "bauchi": "Bauchi",
+    "gombe": "Gombe", "damaturu": "Yobe",
+}
+
+MARKET_GROUPS = {
+    "South-West": ["Lagos", "Ogun", "Oyo", "Osun", "Ondo", "Ekiti"],
+    "South-East": ["Anambra", "Enugu", "Imo", "Abia", "Ebonyi"],
+    "South-South": ["Rivers", "Delta", "Bayelsa", "Edo", "Cross River", "Akwa Ibom"],
+    "North-Central": ["FCT", "Niger", "Nasarawa", "Kogi", "Kwara", "Plateau", "Benue"],
+    "North-West": ["Kano", "Kaduna", "Katsina", "Jigawa", "Kebbi", "Sokoto", "Zamfara"],
+    "North-East": ["Borno", "Yobe", "Adamawa", "Taraba", "Gombe", "Bauchi"],
+}
+
+# Load dealers once
+DEALERS = []
+_dist_path = DATA / "distributors.csv"
+if _dist_path.exists():
+    for row in csv.DictReader(_dist_path.open(encoding="utf-8")):
+        DEALERS.append({
+            "state": (row.get("state") or "").strip(),
+            "place": (row.get("place") or "").strip(),
+            "dealer": (row.get("dealer") or "").strip(),
+            "address": (row.get("address") or "").strip(),
+            "phones": (row.get("phones") or "").strip(),
+        })
+
+
+def resolve_location(text):
+    """Return structured location info with nearest dealers and real phones."""
+    text_l = text.lower()
+    found_state = None
+    found_raw = None
+
+    # whole-word town match
+    for town, state in TOWN_TO_STATE.items():
+        if re.search(rf"\b{re.escape(town)}\b", text_l):
+            found_state = state
+            found_raw = town.title() if town != "ph" else "Port Harcourt"
+            break
+
+    # direct state name
+    if not found_state:
+        for group, states in MARKET_GROUPS.items():
+            for st in states:
+                if re.search(rf"\b{re.escape(st.lower())}\b", text_l):
+                    found_state = st
+                    found_raw = st
+                    break
+            if found_state:
+                break
+
+    if not found_state:
+        return None
+
+    # find market group
+    market = None
+    for g, states in MARKET_GROUPS.items():
+        if found_state in states:
+            market = g
+            break
+
+    # dealers in same state first, then same market
+    same_state = [d for d in DEALERS if d["state"].lower() == found_state.lower()]
+    if not same_state and market:
+        group_states = [s.lower() for s in MARKET_GROUPS.get(market, [])]
+        same_state = [d for d in DEALERS if d["state"].lower() in group_states]
+
+    phones = []
+    for d in same_state[:3]:
+        for p in re.findall(r"[\d\-+() ]{10,}", d["phones"]):
+            np = norm_phone(p)
+            if np and np not in phones and len(np) >= 10:
+                phones.append(np)
+                if len(phones) >= 3:
+                    break
+        if len(phones) >= 3:
+            break
+
+    return {
+        "raw": found_raw or found_state,
+        "state": found_state,
+        "market": market,
+        "dealers": same_state[:3],
+        "phones": phones,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +367,6 @@ def _load_usage():
 
 
 def check_and_reserve(session, ip_hash):
-    """Reserve a slot. Returns (ok, message, remaining). Caller must refund on failure."""
     per_session = env_int("MAX_MSGS_PER_SESSION", 20)
     per_ip = env_int("MAX_MSGS_PER_IP", 40)
     daily = env_int("DAILY_CAP", 300)
@@ -314,6 +424,7 @@ def init_db():
                 lead_need TEXT,
                 lead_quantity TEXT,
                 lead_location TEXT,
+                name_declined INTEGER NOT NULL DEFAULT 0,
                 routed_to TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 whatsapp_tapped INTEGER NOT NULL DEFAULT 0
@@ -331,6 +442,15 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conversation_id);
         """)
+        # migration for older DBs
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN name_declined INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN whatsapp_tapped INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
 
@@ -353,7 +473,6 @@ def get_or_create_conversation(session_id):
                 last = datetime.datetime.fromisoformat(row["last_active"])
                 age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds() / 60
                 if age > ttl_min:
-                    # expired – start fresh
                     conn.execute("DELETE FROM turns WHERE conversation_id = ?", (session_id,))
                     conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
                     conn.commit()
@@ -369,8 +488,8 @@ def get_or_create_conversation(session_id):
                 "id": session_id, "started_at": now, "last_active": now,
                 "stage": "answering", "qualified": 0,
                 "lead_name": None, "lead_need": None, "lead_quantity": None,
-                "lead_location": None, "routed_to": None, "message_count": 0,
-                "whatsapp_tapped": 0
+                "lead_location": None, "name_declined": 0,
+                "routed_to": None, "message_count": 0, "whatsapp_tapped": 0
             }
         finally:
             conn.close()
@@ -416,6 +535,7 @@ def get_recent_turns(conversation_id, limit=6):
             rows = conn.execute(
                 "SELECT role, content FROM turns "
                 "WHERE conversation_id = ? AND error IS NULL "
+                "AND content != '[quote_request]' "
                 "ORDER BY id DESC LIMIT ?",
                 (conversation_id, limit)
             ).fetchall()
@@ -425,7 +545,7 @@ def get_recent_turns(conversation_id, limit=6):
 
 
 # ---------------------------------------------------------------------------
-# Lead extraction (improved)
+# Lead extraction
 # ---------------------------------------------------------------------------
 INTENT_RE = re.compile(
     r"\b(i\s+need|i\s+want|looking\s+for|i\s+would\s+like|i'd\s+like|order|quote\s+for|"
@@ -440,29 +560,12 @@ LOCATOR_RE = re.compile(
     re.I
 )
 
-# Size patterns to strip before looking for quantity
 SIZE_RE = re.compile(r"\b\d+(\.\d+)?\s*mm2?\b", re.I)
 
-# Quantity must have a unit
+# quantity with unit (including imperial)
 QUANTITY_RE = re.compile(
-    r"(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b",
-    re.I
-)
-
-KNOWN_LOCATIONS = {
-    "lagos", "abuja", "port harcourt", "ph", "kano", "ibadan", "kaduna", "enugu",
-    "onitsha", "aba", "jos", "benin", "warri", "calabar", "uyo", "owerri", "ilorin",
-    "abeokuta", "akure", "asaba", "awka", "nnewi", "fct"
-}
-
-LOCATION_RE = re.compile(
-    r"\b(in|at|from|around|near)\s+([A-Za-z][A-Za-z\s-]{2,30})|"
-    r"\b(Lagos|Abuja|Port\s*Harcourt|PH|Kano|Ibadan|Kaduna|Enugu|Onitsha|Aba|Jos|"
-    r"Benin|Warri|Calabar|Uyo|Owerri|Ilorin|Abeokuta|Akure|Asaba|Awka|Nnewi|"
-    r"Abia|Adamawa|Akwa\s*Ibom|Anambra|Bauchi|Bayelsa|Benue|Borno|Cross\s*River|"
-    r"Delta|Ebonyi|Edo|Ekiti|Gombe|Imo|Jigawa|Kaduna|Kano|Katsina|Kebbi|Kogi|"
-    r"Kwara|Lagos|Nasarawa|Niger|Ogun|Ondo|Osun|Oyo|Plateau|Rivers|Sokoto|"
-    r"Taraba|Yobe|Zamfara|FCT)\b",
+    r"(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|ft|feet|foot|yd|yards?|km|kilometers?|kilometres?|"
+    r"rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b",
     re.I
 )
 
@@ -472,53 +575,59 @@ NAME_RE = re.compile(
 )
 
 
+def convert_to_metres(num_str, unit):
+    try:
+        n = float(num_str.replace(",", ""))
+    except ValueError:
+        return None
+    u = unit.lower()
+    if u in ("m", "meter", "meters", "metre", "metres"):
+        return n, f"{num_str} m"
+    if u in ("ft", "feet", "foot"):
+        return n * 0.3048, f"{num_str} ft (≈ {n * 0.3048:.0f} m)"
+    if u in ("yd", "yard", "yards"):
+        return n * 0.9144, f"{num_str} yd (≈ {n * 0.9144:.0f} m)"
+    if u in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
+        return n * 1000, f"{num_str} km (≈ {n * 1000:.0f} m)"
+    # rolls / coils / drums – keep as-is, no conversion
+    return None, f"{num_str} {unit}"
+
+
 def extract_quantity(text):
-    """Strip cable sizes first, then require a unit. Reject pure phone numbers."""
     cleaned = SIZE_RE.sub(" ", text)
     matches = QUANTITY_RE.findall(cleaned)
     for num, unit in matches:
         digits = re.sub(r"\D", "", num)
-        if len(digits) >= 10:          # phone-like
+        if len(digits) >= 10:  # phone-like
             continue
-        return f"{num}{unit}".strip()
+        metres, display = convert_to_metres(num, unit)
+        return display
     return None
-
-
-def extract_location(text):
-    m = LOCATION_RE.search(text)
-    if not m:
-        return None
-    loc = (m.group(2) or m.group(0)).strip()
-    loc = re.sub(r"^(in|at|from|around|near)\s+", "", loc, flags=re.I).strip()
-    if len(loc) < 3:
-        return None
-    # prefer known places
-    low = loc.lower()
-    for known in KNOWN_LOCATIONS:
-        if known in low:
-            return known.title() if known != "ph" else "Port Harcourt"
-    return loc[:60]
 
 
 def extract_name(text, awaiting=False):
     m = NAME_RE.search(text)
     if m:
         name = m.group(1).strip()[:60]
-        if len(name) > 1 and not any(w in name.lower() for w in ("need", "want", "looking", "order", "quote")):
+        if (1 <= len(name.split()) <= 4 and
+            not re.search(r"\d", name) and
+            not any(w in name.lower() for w in ("need", "want", "looking", "order", "quote", "house", "shop"))):
             return name
     if awaiting:
-        # short reply with no digits or question mark → treat as name
         cleaned = text.strip()
-        if (len(cleaned.split()) <= 4 and
-            not re.search(r"\d|\?", cleaned) and
-            cleaned.lower() not in ("no", "skip", "later", "none", "n/a")):
-            return cleaned[:60]
-        if cleaned.lower() in ("no", "skip", "later", "none", "n/a"):
+        if cleaned.lower() in ("no", "skip", "later", "none", "n/a", "prefer not"):
             return "__declined__"
+        if (1 <= len(cleaned.split()) <= 4 and
+            not re.search(r"\d|\?", cleaned)):
+            return cleaned[:60]
     return None
 
 
-def extract_need(text):
+def extract_need(text, qualifying=False):
+    # while already qualifying, accept size/cable type without intent words
+    if qualifying:
+        if SIZE_RE.search(text) or re.search(r"\b(xlpe|pvc|swa|armoured|single\s+core|multicore|hffr)\b", text, re.I):
+            return text.strip()[:120]
     if not INTENT_RE.search(text) or LOCATOR_RE.search(text):
         return None
     m = re.search(
@@ -533,48 +642,67 @@ def extract_need(text):
     return None
 
 
-def extract_lead_fields(text, current, awaiting_name=False):
-    """Latest-wins for every field."""
+def extract_lead_fields(text, current, awaiting_name=False, qualifying=False):
     updated = dict(current)
 
     name = extract_name(text, awaiting=awaiting_name)
-    if name:
-        updated["lead_name"] = None if name == "__declined__" else name
+    if name == "__declined__":
+        updated["name_declined"] = 1
+        updated["lead_name"] = None
+    elif name:
+        updated["lead_name"] = name
+        updated["name_declined"] = 0
 
     qty = extract_quantity(text)
     if qty:
         updated["lead_quantity"] = qty
 
-    loc = extract_location(text)
-    if loc:
-        updated["lead_location"] = loc
+    loc_info = resolve_location(text)
+    if loc_info:
+        updated["lead_location"] = loc_info["raw"]
+        updated["_loc_info"] = loc_info  # temporary for summary
 
-    need = extract_need(text)
+    need = extract_need(text, qualifying=qualifying)
     if need:
         updated["lead_need"] = need
 
     return updated
 
 
+def next_missing_question(fields):
+    """Server-controlled question for the next missing field."""
+    if not fields.get("lead_need"):
+        return "What size and type of cable do you need?"
+    if not fields.get("lead_quantity"):
+        return "What length or quantity do you need?"
+    if not fields.get("lead_location"):
+        return "Which town or state is the project in?"
+    if not fields.get("lead_name") and not fields.get("name_declined"):
+        return "And your name, please?"
+    return None
+
+
 def advance_stage(conv, user_text, bot_reply, quote_request=False):
     stage = conv.get("stage") or "answering"
+    was_routed = stage == "routed"
+
     fields = {
         "lead_name": conv.get("lead_name"),
         "lead_need": conv.get("lead_need"),
         "lead_quantity": conv.get("lead_quantity"),
         "lead_location": conv.get("lead_location"),
+        "name_declined": conv.get("name_declined") or 0,
     }
 
     awaiting = stage == "awaiting_name"
-    fields = extract_lead_fields(user_text, fields, awaiting_name=awaiting)
+    qualifying = stage in ("qualifying", "awaiting_name", "intent_detected")
+    fields = extract_lead_fields(user_text, fields, awaiting_name=awaiting, qualifying=qualifying)
 
     is_locator = bool(LOCATOR_RE.search(user_text))
     has_intent = bool(INTENT_RE.search(user_text)) and not is_locator
-
     if quote_request:
         has_intent = True
 
-    # Stage progression
     if stage == "answering" and (has_intent or quote_request):
         stage = "intent_detected"
 
@@ -584,28 +712,28 @@ def advance_stage(conv, user_text, bot_reply, quote_request=False):
     has_need = bool(fields.get("lead_need"))
     has_qty = bool(fields.get("lead_quantity"))
     has_loc = bool(fields.get("lead_location"))
-    has_name = fields.get("lead_name") is not None   # even declined counts as “handled”
+    name_done = bool(fields.get("lead_name")) or bool(fields.get("name_declined"))
 
     if stage == "qualifying" and has_need and has_qty and has_loc:
-        if not has_name:
+        if not name_done:
             stage = "awaiting_name"
         else:
             stage = "lead_captured"
 
-    if stage == "awaiting_name" and has_name:
+    if stage == "awaiting_name" and name_done:
         stage = "lead_captured"
 
     if stage == "lead_captured":
         stage = "routed"
 
-    # After hand-off, a new clear buying intent starts a fresh lead
-    if stage == "routed" and has_intent and not quote_request:
-        # reset fields except name (keep name if we already have it)
+    # Only start a new lead if we were already routed at the beginning of the turn
+    if was_routed and has_intent and not quote_request:
         fields = {
             "lead_name": fields.get("lead_name"),
-            "lead_need": fields.get("lead_need") if has_intent else None,
+            "lead_need": fields.get("lead_need"),
             "lead_quantity": None,
             "lead_location": None,
+            "name_declined": 0,
         }
         stage = "qualifying"
 
@@ -615,27 +743,39 @@ def advance_stage(conv, user_text, bot_reply, quote_request=False):
 
     qualified = 1 if stage in ("lead_captured", "routed") else 0
 
-    return {
+    result = {
         "stage": stage,
         "qualified": qualified,
         "lead_name": fields.get("lead_name"),
         "lead_need": fields.get("lead_need"),
         "lead_quantity": fields.get("lead_quantity"),
         "lead_location": fields.get("lead_location"),
+        "name_declined": fields.get("name_declined") or 0,
         "routed_to": routed_to,
-    }, qualified and not conv.get("qualified")
+    }
+    if "_loc_info" in fields:
+        result["_loc_info"] = fields["_loc_info"]
+    return result, qualified and not conv.get("qualified")
 
 
-def build_lead_summary(conv, additional=False):
+def build_lead_summary(conv, loc_info=None, additional=False):
     parts = []
     if conv.get("lead_name"):
         parts.append(f"Name: {conv['lead_name']}")
+    elif conv.get("name_declined"):
+        parts.append("Name: (declined)")
     if conv.get("lead_need"):
         parts.append(f"Need: {conv['lead_need']}")
     if conv.get("lead_quantity"):
         parts.append(f"Qty: {conv['lead_quantity']}")
     if conv.get("lead_location"):
         parts.append(f"Location: {conv['lead_location']}")
+
+    if loc_info:
+        parts.append(f"Route to: {loc_info['state']} ({loc_info.get('market') or 'nearest'})")
+        if loc_info.get("phones"):
+            parts.append("Local phones: " + ", ".join(loc_info["phones"][:2]))
+
     body = "\n".join(parts) if parts else ""
     if additional and body:
         return "Additional to my earlier message:\n\n" + body
@@ -650,21 +790,18 @@ def build_whatsapp_url(summary=""):
     return base + "?text=" + quote("Hello Cutix")
 
 
-def build_confirmation(conv):
-    """Server-built confirmation message."""
-    bits = []
-    if conv.get("lead_quantity"):
-        bits.append(conv["lead_quantity"])
-    if conv.get("lead_need"):
-        bits.append(conv["lead_need"])
-    if conv.get("lead_location"):
-        bits.append("in " + conv["lead_location"])
-    if not bits:
-        return None
-    msg = "Just to confirm: " + ", ".join(bits) + ". Is that right?"
-    if not conv.get("lead_name"):
-        msg += " And your name?"
-    return msg
+def strip_handoff_language(text):
+    """Remove any WhatsApp / hand-off wording the model may have added."""
+    patterns = [
+        r"(?i)tap\s+(the\s+)?(continue\s+on\s+)?whatsapp.*",
+        r"(?i)click\s+(the\s+)?whatsapp.*",
+        r"(?i)continue\s+on\s+whatsapp.*",
+        r"(?i)reach\s+(them|us|the\s+team)\s+(directly|on\s+whatsapp).*",
+        r"(?i)i.?ll\s+pass\s+this.*",
+    ]
+    for p in patterns:
+        text = re.sub(p, "", text).strip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +823,7 @@ def answer(message, history=None, paced=True, lead_state=None):
 
     system = SYSTEM_PROMPT
     if lead_state:
-        system += "\n\nCurrent lead state (use for confirmation and summary):\n" + json.dumps(lead_state)
+        system += "\n\nCurrent lead state (use only for product answers, do not ask for missing fields or mention WhatsApp):\n" + json.dumps(lead_state)
 
     if paced and provider != "mock" and not throttle():
         return "I'm getting a lot of questions right now. Please try again in a few seconds.", "throttled"
@@ -699,7 +836,6 @@ def answer(message, history=None, paced=True, lead_state=None):
 
 
 def guard_invented_contacts(text):
-    """Replace reply if it invents a phone or email not in the allowed set."""
     phones = PHONE_RE.findall(text)
     emails = EMAIL_RE.findall(text)
     for p in phones:
@@ -715,7 +851,7 @@ def guard_invented_contacts(text):
 # HTTP
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CutixDemo/0.5"
+    server_version = "CutixDemo/0.6"
 
     def log_message(self, fmt, *args):
         pass
@@ -770,7 +906,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/stats":
             token = env("ADMIN_TOKEN")
             auth = self.headers.get("Authorization", "")
-            if not token or auth != f"Bearer {token}":
+            if not token or not hashlib.compare_digest(auth, f"Bearer {token}"):
                 self._send(401, {"error": "Unauthorized"})
                 return
             with _db_lock:
@@ -803,20 +939,39 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/session":
-            # restore chat for short-lived session
             session = self.headers.get("X-Session-Id") or ""
             if not session:
                 self._send(400, {"error": "missing session"})
                 return
             conv = get_or_create_conversation(session)
             turns = get_recent_turns(session, limit=20)
-            self._send(200, {"stage": conv["stage"], "turns": turns, "qualified": bool(conv["qualified"])})
+            self._send(200, {
+                "stage": conv["stage"],
+                "turns": turns,
+                "qualified": bool(conv["qualified"]),
+            })
             return
 
         self._send(404, "Not found")
 
     def do_POST(self):
-        if self.path != "/chat":
+        path = self.path.split("?")[0]
+
+        if path == "/whatsapp-tapped":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                self._send(400, {"error": "bad json"})
+                return
+            session = (body.get("session") or "").strip()
+            if session:
+                update_conversation(session, whatsapp_tapped=1)
+            self._send(200, {"ok": True})
+            return
+
+        if path != "/chat":
             self._send(404, "Not found")
             return
 
@@ -844,9 +999,9 @@ class Handler(BaseHTTPRequestHandler):
         ip_hash = self._ip_hash()
         conv = get_or_create_conversation(session)
 
-        # Quote button: server asks first question, no model call
+        # Quote button – server asks first question, no model
         if quote_request:
-            reply = "Tell me what you need and I'll start your quote. What size and length are you looking for?"
+            reply = "Tell me what you need and I'll start your quote. What size and type of cable are you looking for?"
             log_turn(session, "user", "[quote_request]")
             log_turn(session, "assistant", reply)
             update_conversation(session, stage="qualifying")
@@ -858,22 +1013,68 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # Reserve usage slot
         ok, err_msg, remaining = check_and_reserve(session, ip_hash)
         if not ok:
             self._send(429, {"error": err_msg})
             return
 
-        # Server-side history
         history = get_recent_turns(session, limit=env_int("HISTORY_WINDOW", 6))
+        stage = conv.get("stage") or "answering"
+        qualifying = stage in ("qualifying", "awaiting_name", "intent_detected")
 
+        # Server-controlled next question while qualifying
+        if qualifying:
+            # first extract what we can from this message
+            temp_fields = extract_lead_fields(
+                message,
+                {
+                    "lead_name": conv.get("lead_name"),
+                    "lead_need": conv.get("lead_need"),
+                    "lead_quantity": conv.get("lead_quantity"),
+                    "lead_location": conv.get("lead_location"),
+                    "name_declined": conv.get("name_declined") or 0,
+                },
+                awaiting_name=(stage == "awaiting_name"),
+                qualifying=True,
+            )
+            q = next_missing_question(temp_fields)
+            if q:
+                # still missing something – ask it, optionally let model answer product part first
+                t0 = time.time()
+                lead_state = {
+                    "name": temp_fields.get("lead_name"),
+                    "need": temp_fields.get("lead_need"),
+                    "quantity": temp_fields.get("lead_quantity"),
+                    "location": temp_fields.get("lead_location"),
+                    "stage": stage,
+                }
+                model_reply, error = answer(message, history=history, lead_state=lead_state)
+                ms = int((time.time() - t0) * 1000)
+                if error:
+                    refund(session, ip_hash)
+                model_reply = strip_handoff_language(model_reply or "")
+                reply = (model_reply + "\n\n" + q).strip() if model_reply and not error else q
+                updated, _ = advance_stage(conv, message, reply)
+                update_conversation(session, **{k: v for k, v in updated.items() if not k.startswith("_")})
+                log_turn(session, "user", message)
+                log_turn(session, "assistant", reply, ms=ms, provider=env("PROVIDER"), error=error)
+                self._send(200, {
+                    "reply": reply,
+                    "qualified": False,
+                    "whatsapp_url": None,
+                    "remaining": remaining,
+                    "stage": updated["stage"],
+                })
+                return
+
+        # Normal model call
         t0 = time.time()
         lead_state = {
             "name": conv.get("lead_name"),
             "need": conv.get("lead_need"),
             "quantity": conv.get("lead_quantity"),
             "location": conv.get("lead_location"),
-            "stage": conv.get("stage"),
+            "stage": stage,
         }
         reply, error = answer(message, history=history, lead_state=lead_state)
         ms = int((time.time() - t0) * 1000)
@@ -885,28 +1086,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"reply": reply, "qualified": False, "remaining": remaining})
             return
 
-        # Guard invented contacts
         reply, was_replaced = guard_invented_contacts(reply)
         if was_replaced:
             error = "invented_contact"
 
-        # Advance stage
-        updated, newly = advance_stage(conv, message, reply, quote_request=False)
+        reply = strip_handoff_language(reply)
+
+        updated, newly = advance_stage(conv, message, reply)
+        loc_info = updated.pop("_loc_info", None)
         update_conversation(session, **updated)
 
         log_turn(session, "user", message)
         log_turn(session, "assistant", reply, ms=ms, provider=env("PROVIDER"), error=error)
 
-        # Confirmation when we just got the three fields
-        if updated["stage"] == "awaiting_name" and not conv.get("lead_name"):
-            conf = build_confirmation(updated)
-            if conf:
-                reply = conf
-
         whatsapp_url = None
         if updated["qualified"]:
             additional = bool(conv.get("whatsapp_tapped"))
-            summary = build_lead_summary(updated, additional=additional)
+            summary = build_lead_summary(updated, loc_info=loc_info, additional=additional)
             whatsapp_url = build_whatsapp_url(summary)
 
         self._send(200, {
