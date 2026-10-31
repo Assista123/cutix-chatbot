@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cutix Assistant (demo)</title>
 <style>
-:root{--red:#d71920;--red-d:#b5131a;--ink:#111;--bg:#f4f4f5;--card:#fff;--text:#1b1b1d;--muted:#6b6b72;--line:#e3e3e6;--bot:#fff;--user:#d71920;--usertext:#fff}
+:root{--red:#d71920;--ink:#111;--bg:#f4f4f5;--card:#fff;--text:#1b1b1d;--muted:#6b6b72;--line:#e3e3e6;--bot:#fff;--user:#d71920;--usertext:#fff}
 @media (prefers-color-scheme:dark){:root{--bg:#141416;--card:#1d1d20;--text:#ececef;--muted:#9a9aa3;--line:#2b2b30;--bot:#242428}}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -14,7 +14,6 @@ body{font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;backgro
 header{background:var(--ink);color:#fff;display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:3px solid var(--red)}
 .badge{background:#fff;border-radius:8px;padding:4px 8px;display:flex;align-items:center}
 .badge img{height:34px;width:auto;display:block}
-.badge span{color:var(--red);font-weight:800;font-size:15px}
 header h1{font-size:16px;margin:0;line-height:1.2}
 header small{color:#b9b9bf;font-size:12px}
 .note{font-size:12px;color:var(--muted);background:var(--card);border-bottom:1px solid var(--line);padding:6px 14px}
@@ -32,8 +31,8 @@ header small{color:#b9b9bf;font-size:12px}
 @keyframes b{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
 .actions{display:flex;gap:8px;padding:8px 14px 0;background:var(--bg)}
 .actions a,.actions button{flex:1;text-align:center;font-size:14px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);text-decoration:none;cursor:pointer;font:inherit}
-.actions a.wa{border-color:var(--line);color:var(--muted);opacity:.75}
-.actions a.wa.ready{border-color:#1fa855;color:#1fa855;opacity:1;font-weight:700;background:#f0faf4}
+.actions a.wa{border-color:var(--line);color:var(--muted);opacity:.55;pointer-events:none;cursor:default}
+.actions a.wa.ready{border-color:#1fa855;color:#1fa855;opacity:1;font-weight:700;background:#f0faf4;pointer-events:auto;cursor:pointer}
 .actions button.quote{border-color:var(--red);color:var(--red)}
 .actions button.quote:hover{background:var(--red);color:#fff}
 form{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg)}
@@ -75,26 +74,23 @@ const store={
   get(k){try{return localStorage.getItem(k)}catch(e){return null}},
   set(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 };
-
 function newSession(){
   return (window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Math.random()).slice(2)+Date.now();
 }
 let session = store.get('cutix_sid') || newSession();
 store.set('cutix_sid', session);
 let code = store.get('cutix_code') || '';
-
 const isTouch = window.matchMedia('(pointer:coarse)').matches;
 const chipsList = ["What does Cutix make?","Where can I buy Cutix in Jos?","I need cables for my shop in Port Harcourt","What is HFFR cable?"];
 
 function fmt(t){
-  // Safe link building – only http/https, no visitor-message auto-linking of arbitrary text
   let s = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   s = s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   s = s.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, m => {
     try {
       const u = new URL(m);
       if (u.protocol === 'http:' || u.protocol === 'https:') {
-        return `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`;
+        return `<a href="\( {m}" target="_blank" rel="noopener noreferrer"> \){m}</a>`;
       }
     } catch(e){}
     return m;
@@ -126,11 +122,24 @@ function add(cls, html) {
 }
 function addBot(t){ return add('bot', fmt(t)); }
 function typing(){ return add('bot', '<span class="typing"><i></i><i></i><i></i></span>'); }
-
 function resetTextarea(){
   const t = $('t');
   t.value = '';
   t.style.height = 'auto';
+}
+
+function setWhatsAppReady(url) {
+  const wa = $('wa');
+  wa.href = url;
+  wa.textContent = 'Continue on WhatsApp';
+  wa.classList.add('ready');
+}
+
+function setWhatsAppDisabled() {
+  const wa = $('wa');
+  wa.removeAttribute('href');
+  wa.textContent = 'WhatsApp Cutix';
+  wa.classList.remove('ready');
 }
 
 async function send(text, opts={}) {
@@ -168,11 +177,7 @@ async function send(text, opts={}) {
         $('left').textContent = j.remaining + ' message' + (j.remaining === 1 ? '' : 's') + ' left in this demo. ';
       }
       if (j.qualified && j.whatsapp_url) {
-        $('wa').href = j.whatsapp_url;
-        $('wa').textContent = 'Continue on WhatsApp';
-        $('wa').classList.add('ready');
-        // mark that WhatsApp was prepared (for "additional" messages later)
-        store.set('cutix_wa_tapped', '1');
+        setWhatsAppReady(j.whatsapp_url);
       }
     }
   } catch(e) {
@@ -203,8 +208,7 @@ $('f').addEventListener('submit', e => {
 
 $('t').addEventListener('keydown', e => {
   if (e.key === 'Enter') {
-    // On touch devices Enter inserts a newline; Send button sends
-    if (isTouch) return;
+    if (isTouch) return;               // phones: Enter = new line
     if (!e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send($('t').value);
@@ -217,19 +221,27 @@ $('t').addEventListener('input', e => {
   e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px';
 });
 
-$('quote').onclick = () => {
-  send('', {quote_request: true});
-};
+$('quote').onclick = () => send('', {quote_request: true});
+
+$('wa').addEventListener('click', () => {
+  if (!$('wa').classList.contains('ready')) {
+    // still disabled – do nothing
+    return;
+  }
+  // report the tap so future leads can say "additional..."
+  fetch('/whatsapp-tapped', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session})
+  }).catch(()=>{});
+});
 
 $('newchat').onclick = () => {
   session = newSession();
   store.set('cutix_sid', session);
-  store.set('cutix_wa_tapped', '');
   history = [];
   $('msgs').innerHTML = '';
-  $('wa').href = cfg.whatsapp || '#';
-  $('wa').textContent = 'WhatsApp Cutix';
-  $('wa').classList.remove('ready');
+  setWhatsAppDisabled();
   $('left').textContent = '';
   startChat();
 };
@@ -238,12 +250,11 @@ async function startChat() {
   try {
     cfg = await (await fetch('/config.json')).json();
   } catch(e) {}
-  $('wa').href = cfg.whatsapp || '#';
+  setWhatsAppDisabled();
   const em = cfg.contactEmail || '';
   const pb = (cfg.poweredBy || '').replace(/&/g,'&amp;').replace(/</g,'&lt;');
   $('powered').innerHTML = (pb ? pb + ' · ' : '') + (em ? 'Demo contact: <a href="mailto:' + em + '">' + em + '</a>' : '');
 
-  // Try to restore previous turns for short-lived session
   let restored = false;
   try {
     const r = await fetch('/session', {headers: {'X-Session-Id': session}});
@@ -256,8 +267,7 @@ async function startChat() {
         });
         restored = true;
         if (j.qualified) {
-          $('wa').classList.add('ready');
-          $('wa').textContent = 'Continue on WhatsApp';
+          // we don't have the exact URL here, but the next message will set it
         }
       }
     }
