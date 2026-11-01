@@ -465,7 +465,8 @@ _db_lock = threading.Lock()
 
 LEAD_KEYS = ("lead_name", "lead_size", "lead_type", "lead_need", "lead_quantity",
              "lead_location", "lead_state", "lead_branch", "lead_second")
-COUNTER_KEYS = ("pending_qty", "pending_loc", "loc_asks", "name_asks", "name_declined", "location_confirmed")
+COUNTER_KEYS = ("pending_qty", "pending_loc", "pending_size", "loc_asks", "name_asks", "size_asks",
+                "name_declined", "location_confirmed")
 CONV_COLS = set(LEAD_KEYS + COUNTER_KEYS + ("stage", "qualified", "routed_to", "whatsapp_tapped",
                                             "message_count", "last_active"))
 
@@ -500,8 +501,10 @@ def init_db():
                 location_confirmed INTEGER NOT NULL DEFAULT 1,
                 pending_qty TEXT,
                 pending_loc TEXT,
+                pending_size TEXT,
                 loc_asks INTEGER NOT NULL DEFAULT 0,
                 name_asks INTEGER NOT NULL DEFAULT 0,
+                size_asks INTEGER NOT NULL DEFAULT 0,
                 routed_to TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 whatsapp_tapped INTEGER NOT NULL DEFAULT 0
@@ -536,10 +539,12 @@ def init_db():
         """)
         # migrate older databases
         for col, typ in [
-            ("lead_size", "TEXT"), ("lead_type", "TEXT"), ("lead_second", "TEXT"),
-            ("pending_qty", "TEXT"), ("pending_loc", "TEXT"),
+            ("lead_need", "TEXT"), ("lead_size", "TEXT"), ("lead_type", "TEXT"),
+            ("lead_state", "TEXT"), ("lead_branch", "TEXT"), ("lead_second", "TEXT"),
+            ("pending_qty", "TEXT"), ("pending_loc", "TEXT"), ("pending_size", "TEXT"),
             ("loc_asks", "INTEGER NOT NULL DEFAULT 0"),
             ("name_asks", "INTEGER NOT NULL DEFAULT 0"),
+            ("size_asks", "INTEGER NOT NULL DEFAULT 0"),
             ("name_declined", "INTEGER NOT NULL DEFAULT 0"),
             ("location_confirmed", "INTEGER NOT NULL DEFAULT 1"),
             ("whatsapp_tapped", "INTEGER NOT NULL DEFAULT 0"),
@@ -588,8 +593,8 @@ def get_or_create_conversation(session_id):
                 "lead_need": None, "lead_quantity": None, "lead_location": None,
                 "lead_state": None, "lead_branch": None, "lead_second": None,
                 "name_declined": 0, "location_confirmed": 1,
-                "pending_qty": None, "pending_loc": None,
-                "loc_asks": 0, "name_asks": 0,
+                "pending_qty": None, "pending_loc": None, "pending_size": None,
+                "loc_asks": 0, "name_asks": 0, "size_asks": 0,
                 "routed_to": None, "message_count": 0, "whatsapp_tapped": 0
             }
         finally:
@@ -727,7 +732,7 @@ def _purge_loop():
 
 
 # ---------------------------------------------------------------------------
-# Lead extraction helpers
+# Lead extraction
 # ---------------------------------------------------------------------------
 # Strong buying intent. The only kind allowed to start a NEW lead after a hand-off.
 STRONG_START_RE = re.compile(
@@ -752,86 +757,170 @@ NOT_START_RE = re.compile(
 LOCATOR_RE = re.compile(
     r"\b(where\s+(can|do|to)\s+i\s+(buy|find|get)|nearest\s+(dealer|branch|distributor|shop)|"
     r"closest\s+(shop|dealer|branch)|dealers?\s+in|branches?\s+in|where\s+to\s+buy|"
-    r"do\s+you\s+have\s+(a\s+)?(dealer|branch|distributor))\b",
-    re.I
-)
+    r"do\s+you\s+have\s+(a\s+)?(dealer|branch|distributor))\b", re.I)
 
-SIZE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*mm2?\b", re.I)
-TYPE_RE = re.compile(r"\b(xlpe|pvc|swa|armoured|non-?armoured|single\s+core|multicore|hffr|flexible|house\s+wiring)\b", re.I)
-
+SIZE_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(?:sq\.?\s*mm|sqmm|mm\s*sq|mm2|mm)(?![A-Za-z])", re.I)
 QUANTITY_RE = re.compile(
-    r"(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|ft|feet|foot|yd|yards?|km|kilometers?|kilometres?|"
-    r"rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b",
-    re.I
-)
+    r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s*(m|meters?|metres?|ft|feet|foot|yd|yards?|km|kilometers?|kilometres?|"
+    r"rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b", re.I)
+UNIT_ONLY_RE = re.compile(r"^\s*(m|metres?|meters?|ft|feet|foot|yards?|yd|km|rolls?|coils?|drums?)\s*[.!]?\s*$", re.I)
+BARE_NUM_RE = re.compile(r"^\s*(\d[\d,]*(?:\.\d+)?)\s*[.!]?\s*$")
 
-NAME_RE = re.compile(
-    r"(?:my\s+name\s+is|i\s+am|i'?m|this\s+is|name['\s:]+)\s*([A-Za-z][A-Za-z\s'-]{1,40})",
-    re.I
-)
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+             "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
+_NUMWORD_RE = re.compile(
+    r"\b(" + "|".join(NUM_WORDS) + r")\b(?=\s*(?:rolls?|coils?|drums?|pieces?|pcs?|lengths?)\b)", re.I)
 
-QUESTION_START_RE = re.compile(r"^(?:what|which|how|why|when|where|who|is|are|can|do|does|did|will|would|should)\b", re.I)
+SIZE_UNSURE = "size to be advised"
+UNSURE_RE = re.compile(
+    r"\b(not\s+sure|don'?t\s+know|dont\s+know|no\s+idea|unsure|i\s+don'?t\s+have|"
+    r"whatever\s+is\s+(?:suitable|best)|any(?:thing)?\s+(?:suitable|will\s+do))\b", re.I)
+YES_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|yea|correct|that'?s\s+(?:right|correct)|right|ok(?:ay)?|sure|fine|exactly|"
+    r"confirmed?|sounds\s+good|go\s+ahead)\b[\s,.!-]*", re.I)
+NO_RE = re.compile(r"^\s*(?:no|nope|nah|wrong|incorrect|not\s+(?:right|correct|quite))\b", re.I)
+DECLINE_RE = re.compile(
+    r"^\s*(?:no|skip|later|none|n/?a|anonymous|pass|no\s+thanks|not\s+now|prefer\s+not(?:\s+to)?|rather\s+not)\s*[.!]?\s*$",
+    re.I)
+QUESTION_START_RE = re.compile(
+    r"^\s*(what|how|which|why|when|where|who|can|could|do|does|is|are|will|should|would)\b", re.I)
 
-SIZE_UNSURE = "size not specified"
+NAME_BLOCK = {
+    "a", "an", "the", "in", "at", "from", "to", "for", "of", "on", "and", "but", "i", "im", "i'm", "my", "me",
+    "we", "you", "looking", "need", "needs", "want", "wants", "interested", "order", "quote", "house", "shop",
+    "project", "site", "office", "building", "cable", "cables", "wire", "wiring", "price", "please", "pls",
+    "thanks", "thank", "hello", "hi", "hey", "yes", "no", "not", "just", "here", "there", "ready", "sorry",
+    "fine", "good", "okay", "ok", "sure", "what", "how", "where", "when", "why", "who", "which", "can", "do",
+    "does", "is", "are", "will", "should", "size", "length", "metres", "meters", "feet", "rolls", "with", "that",
+}
+
+_NAME_EXPLICIT_RE = re.compile(
+    r"(?i:my\s+name\s+is|my\s+name'?s|name\s+is|name\s*:|call\s+me)\s+([A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){0,2})")
+_NAME_WEAK_RE = re.compile(
+    r"(?i:\bi'?m|\bi\s+am|\bthis\s+is)\s+([A-Z][A-Za-z'\-]*(?:\s+[A-Z][A-Za-z'\-]*){0,2})")
+
+_TYPE_PATTERNS = [
+    (re.compile(r"\bxlpe\b", re.I), "XLPE"), (re.compile(r"\bpvc\b", re.I), "PVC"),
+    (re.compile(r"\bswa\b", re.I), "SWA"), (re.compile(r"\bhffr\b", re.I), "HFFR"),
+    (re.compile(r"\bncx\b", re.I), "NCX"),
+    (re.compile(r"\bsingle[\s-]*core\b", re.I), "single core"),
+    (re.compile(r"\bmulti[\s-]*core\b", re.I), "multicore"),
+    (re.compile(r"\b(\d)\s*-?\s*core\b", re.I), None),
+    (re.compile(r"\b(?:non|un)[\s-]*armou?red\b", re.I), "unarmoured"),
+    (re.compile(r"\barmou?red\b", re.I), "armoured"),
+    (re.compile(r"\bflexible\b", re.I), "flexible"),
+    (re.compile(r"\bhouse\s+wiring\b", re.I), "house wiring"),
+    (re.compile(r"\btwin\s+(?:and|&)\s+earth\b", re.I), "twin and earth"),
+    (re.compile(r"\bcopper\b", re.I), "copper"),
+    (re.compile(r"\balumin(?:i)?um\b", re.I), "aluminium"),
+]
 
 
-def convert_to_metres(num_str, unit):
-    try:
-        n = float(num_str.replace(",", ""))
-    except ValueError:
-        return None, f"{num_str} {unit}"
+def _load_standard_sizes():
+    """Standard conductor sizes (mm2) come from the spec CSV files; fall back to the usual series."""
+    found = set()
+    for spec in sorted(DATA.glob("spec_*.csv")):
+        try:
+            with spec.open(encoding="utf-8-sig", newline="") as fh:
+                for row in csv.DictReader(fh):
+                    try:
+                        found.add(float(str(row.get("size_mm2", "")).replace(",", "").strip()))
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+    if not found:
+        found = {0.5, 0.75, 1, 1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95, 120, 150, 185, 240, 300, 400, 500, 630}
+    return sorted(found)
+
+
+STANDARD_SIZES = _load_standard_sizes()
+
+
+def fmt_size(x):
+    return f"{x:g}mm"
+
+
+def is_standard_size(x):
+    return any(abs(x - s) < 1e-9 for s in STANDARD_SIZES)
+
+
+def nearest_sizes(x):
+    lo = [s for s in STANDARD_SIZES if s < x]
+    hi = [s for s in STANDARD_SIZES if s > x]
+    pick = ([max(lo)] if lo else []) + ([min(hi)] if hi else [])
+    return " and ".join(fmt_size(v) for v in pick)
+
+
+def parse_sizes(text):
+    seen = []
+    for m in SIZE_RE.finditer(text.replace("\u00b2", "2")):
+        v = float(m.group(1))
+        if v not in seen:
+            seen.append(v)
+    return seen
+
+
+def extract_types(text):
+    found, spans = [], []
+    for rx, label in _TYPE_PATTERNS:
+        for m in rx.finditer(text):
+            if any(m.start() < e and m.end() > s for s, e in spans):
+                continue
+            spans.append((m.start(), m.end()))
+            found.append((m.start(), label if label else f"{m.group(1)}-core"))
+    found.sort()
+    out = []
+    for _, lab in found:
+        if lab not in out:
+            out.append(lab)
+    return " ".join(out) if out else None
+
+
+def format_qty(num, unit):
     u = unit.lower()
+    try:
+        n = float(num.replace(",", ""))
+    except ValueError:
+        return f"{num} {u}"
     if u in ("m", "meter", "meters", "metre", "metres"):
-        return n, f"{num_str} m"
+        return f"{num} m"
     if u in ("ft", "feet", "foot"):
-        return n * 0.3048, f"{num_str} ft (≈ {n * 0.3048:.0f} m)"
+        return f"{num} ft (≈ {round(n * 0.3048):,} m)"
     if u in ("yd", "yard", "yards"):
-        return n * 0.9144, f"{num_str} yd (≈ {n * 0.9144:.0f} m)"
+        return f"{num} yd (≈ {round(n * 0.9144):,} m)"
     if u in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
-        return n * 1000, f"{num_str} km (≈ {n * 1000:.0f} m)"
-    return None, f"{num_str} {unit}"
+        return f"{num} km (≈ {round(n * 1000):,} m)"
+    return f"{num} {u}"
 
 
 def extract_quantity(text):
-    cleaned = SIZE_RE.sub(" ", text)
-    matches = QUANTITY_RE.findall(cleaned)
-    for num, unit in matches:
-        digits = re.sub(r"\D", "", num)
-        if len(digits) >= 10:
+    t = text.replace("²", "2")
+    t = _NUMWORD_RE.sub(lambda m: str(NUM_WORDS[m.group(1).lower()]), t)
+    t = SIZE_RE.sub(" ", t)
+    for m in QUANTITY_RE.finditer(t):
+        num, unit = m.group(1), m.group(2)
+        if len(re.sub(r"\D", "", num)) >= 10:
             continue
-        _, display = convert_to_metres(num, unit)
-        return display
+        return format_qty(num, unit)
     return None
 
 
-def extract_size(text):
-    m = SIZE_RE.search(text)
-    return m.group(0) if m else None
-
-
-def extract_type(text):
-    m = TYPE_RE.search(text)
-    return m.group(0) if m else None
-
-
-def name_from_reply(text):
-    m = NAME_RE.search(text)
-    if m:
-        name = m.group(1).strip()[:60]
-        if (1 <= len(name.split()) <= 4 and
-            not re.search(r"\d", name) and
-            not any(w in name.lower() for w in ("need", "want", "looking", "order", "quote", "house", "shop"))):
-            return name
-    cleaned = text.strip()
-    if cleaned.lower() in ("no", "skip", "later", "none", "n/a", "prefer not"):
-        return "__declined__"
-    if (1 <= len(cleaned.split()) <= 4 and not re.search(r"\d|\?", cleaned)):
-        return cleaned[:60]
-    return None
+def extract_need_text(text):
+    m = re.search(r"(?:i\s+need|i\s+want|we\s+need|we\s+want|looking\s+for|i\s+would\s+like|i'd\s+like|we'd\s+like)\s+(.{4,100})",
+                  text, re.I)
+    if not m:
+        return None
+    need = m.group(1)
+    need = QUANTITY_RE.sub(" ", need)
+    if LOC_RE:
+        need = LOC_RE.sub(" ", need)
+    need = re.sub(r"\b(?:in|at|to|for|from)\s*$", "", re.sub(r"\s+", " ", need).strip(" ,.;-"), flags=re.I).strip(" ,.;-")
+    return need[:80] if len(need) >= 4 else None
 
 
 def is_question(text):
-    return bool(QUESTION_START_RE.match(text.strip()) or text.strip().endswith("?"))
+    return "?" in text or bool(QUESTION_START_RE.match(text))
 
 
 def is_lead_start(text, stage):
@@ -845,168 +934,338 @@ def weak_buying_words(text):
     return bool(re.search(r"\b(order|buy|purchase|supply|quote|price)\b", text, re.I))
 
 
-def apply_extraction(f, text, allow_unknown=True):
-    caps = []
-    size = extract_size(text)
-    if size:
-        f["lead_size"] = size
-        caps.append(size)
-    typ = extract_type(text)
-    if typ:
-        f["lead_type"] = typ
-        caps.append(typ)
-    qty = extract_quantity(text)
-    if qty:
-        f["lead_quantity"] = qty
-        caps.append(qty)
-    loc = resolve_location(text)
-    if loc:
-        f["lead_location"] = loc["raw"]
-        f["lead_state"] = loc["state"]
-        f["lead_branch"] = loc["branch_label"]
-        f["lead_second"] = loc.get("second_label")
-        f["location_confirmed"] = 1
-        caps.append(loc["raw"])
-    elif allow_unknown and re.search(r"\b(?:in|at|from|around|near)\s+[A-Za-z]", text, re.I):
-        m = re.search(r"\b(?:in|at|from|around|near)\s+([A-Za-z][A-Za-z\s\-]{2,40})", text, re.I)
+def name_from_reply(text):
+    """Return a name, '__declined__', or None. Used when we expect a name or a short reply."""
+    t = text.strip().strip(".!").strip()
+    if not t:
+        return None
+    if DECLINE_RE.match(t):
+        return "__declined__"
+    t = re.sub(r"^(?:it'?s|its|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|my\s+name'?s|name\s+is|"
+               r"call\s+me|the\s+name\s+is)\s+", "", t, flags=re.I)
+    if re.search(r"[\d?@/:]", t) or UNSURE_RE.search(t):
+        return None
+    if YES_RE.match(t) or NO_RE.match(t) or QUESTION_START_RE.match(t):
+        return None
+    keep = []
+    for w in t.split():
+        if w.lower().strip(".,'") in NAME_BLOCK:
+            break
+        keep.append(w)
+    if not keep or len(keep) > 3:
+        return None
+    cand = " ".join(keep)
+    if resolve_location(cand):
+        return None
+    return " ".join(w.capitalize() if w.islower() else w for w in keep)[:60]
+
+
+def extract_name_strict(text):
+    for rx in (_NAME_EXPLICIT_RE, _NAME_WEAK_RE):
+        m = rx.search(text)
         if m:
-            f["lead_location"] = m.group(1).strip()
-            f["location_confirmed"] = 0
-            caps.append(f["lead_location"] + " (to confirm)")
-    return caps
-
-
-def prompt_for(conv):
-    if not (conv.get("lead_size") or conv.get("lead_need")):
-        return "What size and type of cable do you need?"
-    if not conv.get("lead_quantity"):
-        return "What length or quantity do you need?"
-    if not conv.get("lead_location"):
-        return "Which town or state is the project in?"
-    if not conv.get("lead_name") and not conv.get("name_declined"):
-        return "And your name, please?"
+            nm = name_from_reply(m.group(1))
+            if nm and nm != "__declined__":
+                return nm
     return None
 
 
-def build_confirmation(f):
-    bits = []
-    if f.get("lead_size"):
-        bits.append(f["lead_size"])
-    if f.get("lead_type"):
-        bits.append(f["lead_type"])
-    if f.get("lead_need") and not f.get("lead_size"):
-        bits.append(f["lead_need"])
-    if f.get("lead_quantity"):
-        bits.append(f["lead_quantity"])
-    if f.get("lead_location"):
-        bits.append("in " + f["lead_location"])
-    if not bits:
-        return None
-    msg = "Just to confirm: " + ", ".join(bits) + ". Is that right?"
-    if not f.get("lead_name") and not f.get("name_declined"):
-        msg += " And your name?"
-    return msg
+# ---------------------------------------------------------------------------
+# Lead state machine (pure functions; no I/O)
+# ---------------------------------------------------------------------------
+def blank_lead(conv):
+    d = {k: None for k in LEAD_KEYS}
+    d.update({"pending_qty": None, "pending_loc": None, "pending_size": None, "loc_asks": 0, "name_asks": 0,
+              "size_asks": 0, "location_confirmed": 1})
+    d["lead_name"] = conv.get("lead_name")
+    d["name_declined"] = conv.get("name_declined") or 0
+    return d
 
 
-def build_handoff_message(f):
-    name = f.get("lead_name") or "there"
-    return (f"Thanks, {name}. Your details are ready. "
-            "Tap **Continue on WhatsApp** below and the team will have everything.")
+def missing_field(f):
+    if f.get("pending_size") or not f.get("lead_size"):
+        return "size"
+    if not f.get("lead_quantity"):
+        return "qty"
+    if not f.get("lead_location"):
+        return "loc"
+    return None
 
 
 def name_needed(f):
     return not f.get("lead_name") and not f.get("name_declined")
 
 
+def question_for(f):
+    m = missing_field(f)
+    if m == "size":
+        if f.get("pending_size"):
+            n = f["pending_size"]
+            return (f"{n} isn't one of our standard sizes. The nearest are {nearest_sizes(float(n[:-2]))}. "
+                    f"Which would you like? Or say 'keep {n}' and the team will advise.")
+        if f.get("lead_type"):
+            return f"What size (in mm) is the {f['lead_type']} cable? If you're not sure, just say so."
+        return "What size and type of cable do you need? If you're not sure, tell me what it's for."
+    if m == "qty":
+        if f.get("pending_qty"):
+            return f"Is that {f['pending_qty']} metres, feet or rolls?"
+        return "What length or quantity do you need? (metres, feet or rolls)"
+    if m == "loc":
+        if f.get("pending_loc"):
+            return f"Which state is {f['pending_loc']} in?"
+        return "Which town or state is the project in?"
+    return None
+
+
+def build_confirmation(f):
+    size, typ = f.get("lead_size"), f.get("lead_type")
+    if size == SIZE_UNSURE:
+        item = (typ + " " if typ else "") + "(size to be advised by the team)"
+    else:
+        item = " ".join(x for x in (size, typ) if x) or "cable"
+    qty = f.get("lead_quantity") or ""
+    if re.search(r"roll|coil|drum", qty, re.I):
+        qty += " (team will confirm length per roll)"
+    loc = f.get("lead_location") or ""
+    if f.get("lead_branch") and f.get("location_confirmed", 1):
+        loc += f" (nearest point: {f['lead_branch']})"
+    else:
+        loc += " (team will confirm the nearest point)"
+    lines = ["Please confirm your request:",
+             f"Name: {f.get('lead_name') or '(not given)'}",
+             f"Size/type: {item}",
+             f"Length: {qty}",
+             f"Location: {loc}",
+             "Is that right?"]
+    return "\n".join(lines)
+
+
+def name_prompt(f):
+    return "And your name, please? (You can say skip.)"
+
+
+def prompt_for(f):
+    stage = f.get("stage")
+    if stage == "confirming":
+        return build_confirmation(f)
+    if stage == "awaiting_name":
+        return name_prompt(f)
+    if stage == "qualifying":
+        return question_for(f) or build_confirmation(f)
+    return None
+
+
+def lead_context(f):
+    return {"size": f.get("lead_size"), "type": f.get("lead_type"),
+            "quantity": f.get("lead_quantity"), "location": f.get("lead_location")}
+
+
+def build_handoff_message(f):
+    name = (f.get("lead_name") or "").split(" ")[0]
+    msg = f"Thanks, {name}. " if name else "Thanks. "
+    msg += "Your request is ready. "
+    if f.get("lead_branch") and f.get("location_confirmed", 1):
+        msg += f"Your nearest Cutix point is {f['lead_branch']}. "
+    else:
+        msg += f"The team will confirm the nearest point for {f.get('lead_location') or 'your location'}. "
+    msg += "Tap Continue on WhatsApp below and the team will have all the details."
+    return msg
+
+
+def _expecting_location(f):
+    return bool(f.get("lead_size") and f.get("lead_quantity") and not f.get("lead_location")
+                and not f.get("pending_size"))
+
+
+def _place_like(t):
+    words = t.split()
+    return (1 <= len(words) <= 5 and len(t) <= 40 and not re.search(r"[\d?]", t)
+            and not YES_RE.match(t) and not NO_RE.match(t) and not DECLINE_RE.match(t)
+            and not UNSURE_RE.search(t) and not QUESTION_START_RE.match(t))
+
+
+def apply_extraction(f, text, allow_unknown=False):
+    """Latest-wins update of lead fields from one message. Returns list of newly captured items."""
+    caps = []
+    t = text.replace("²", "2").strip()
+    expecting_loc = _expecting_location(f)
+
+    if f.get("pending_qty"):
+        m = UNIT_ONLY_RE.match(t)
+        if m:
+            q = format_qty(f["pending_qty"], m.group(1))
+            f["lead_quantity"], f["pending_qty"] = q, None
+            caps.append(q)
+
+    sizes = parse_sizes(t)
+    _apply_sizes(f, t, caps)
+    if not sizes and not f.get("lead_size") and not f.get("pending_size") and UNSURE_RE.search(t):
+        f["lead_size"] = SIZE_UNSURE
+
+    types = extract_types(t)
+    if types:
+        f["lead_type"] = types
+        caps.append(types)
+
+    if not sizes and not types and START_RE.search(t) and not f.get("lead_need"):
+        need = extract_need_text(t)
+        if need:
+            f["lead_need"] = need
+
+    qty = extract_quantity(t)
+    bare = BARE_NUM_RE.match(t)
+    if qty:
+        f["lead_quantity"], f["pending_qty"] = qty, None
+        caps.append(qty)
+    elif bare and f.get("lead_size") and not f.get("lead_quantity"):
+        f["pending_qty"] = bare.group(1)
+
+    li = resolve_location(t)
+    if li:
+        if f.get("pending_loc") and li["raw"].lower() == li["state"].lower():
+            f["lead_location"] = f"{f['pending_loc']}, {li['state']}"
+        else:
+            f["lead_location"] = li["raw"]
+        f["lead_state"], f["lead_branch"], f["lead_second"] = li["state"], li["branch_label"], li["second_label"]
+        f["location_confirmed"], f["pending_loc"], f["loc_asks"] = 1, None, 0
+        caps.append(f["lead_location"])
+    elif allow_unknown and expecting_loc and not caps and not is_question(t):
+        if f.get("pending_loc"):
+            f["lead_location"], f["location_confirmed"] = f["pending_loc"], 0
+            f["lead_state"] = f["lead_branch"] = f["lead_second"] = None
+            f["pending_loc"] = None
+            caps.append(f["lead_location"])
+        elif _place_like(t):
+            f["pending_loc"] = t.strip(" .,!")[:40].title()
+        else:
+            f["loc_asks"] = int(f.get("loc_asks") or 0) + 1
+            if f["loc_asks"] >= 2 and t:
+                f["lead_location"], f["location_confirmed"] = t[:60], 0
+                f["lead_state"] = f["lead_branch"] = f["lead_second"] = None
+                caps.append(f["lead_location"])
+
+    nm = extract_name_strict(text)
+    if nm:
+        f["lead_name"], f["name_declined"] = nm, 0
+
+    return caps
+
+
 def _snapshot(f):
-    return tuple(f.get(k) for k in LEAD_KEYS)
+    return (f.get("lead_name"), f.get("lead_size"), f.get("lead_type"), f.get("lead_quantity"),
+            f.get("lead_location"), f.get("pending_size"))
 
 
-def lead_context(state):
-    return {k: state.get(k) for k in LEAD_KEYS if state.get(k)}
+def _next_stage(f):
+    if missing_field(f):
+        return "qualifying"
+    if name_needed(f):
+        return "awaiting_name"
+    return "confirming"
+
+
+KEEP_RE = re.compile(r"\b(keep|stick|same|still|proceed|go\s+ahead|that\s+one|as\s+is|yes|yeah|ok(?:ay)?)\b", re.I)
+
+
+def _apply_sizes(f, t, caps):
+    """Latest-wins size update. A size outside the standard series is queried, never silently accepted."""
+    sizes = parse_sizes(t)
+    bare = BARE_NUM_RE.match(t)
+    if not sizes and bare and f.get("pending_size"):
+        try:
+            sizes = [float(bare.group(1).replace(",", ""))]
+        except ValueError:
+            pass
+    std = [x for x in sizes if is_standard_size(x)]
+    non = [x for x in sizes if not is_standard_size(x)]
+    pend = f.get("pending_size")
+    if (pend and not std and KEEP_RE.search(t) and not is_question(t)
+            and (not non or fmt_size(non[0]) == pend)):
+        f["lead_size"] = f"{pend} (non-standard, team to confirm)"
+        f["pending_size"], f["size_asks"] = None, 0
+        caps.append(f["lead_size"])
+        return
+    if std:
+        f["lead_size"] = ", ".join(fmt_size(x) for x in std)
+        f["pending_size"], f["size_asks"] = None, 0
+        caps.append(f["lead_size"])
+    if non:
+        f["pending_size"], f["size_asks"] = fmt_size(non[0]), 0
+    elif f.get("pending_size") and not std:
+        accept = KEEP_RE.search(t) and not is_question(t)
+        if not accept and not extract_quantity(t) and not resolve_location(t):
+            f["size_asks"] = int(f.get("size_asks") or 0) + 1
+            accept = f["size_asks"] >= 2
+        if accept:
+            f["lead_size"] = f"{f['pending_size']} (non-standard, team to confirm)"
+            f["pending_size"], f["size_asks"] = None, 0
+            caps.append(f["lead_size"])
 
 
 def lead_turn(conv, text, quote_request=False):
-    """Server-controlled lead state machine. Returns (new_state, event)."""
+    """Return (state, event). state is a dict of conversation columns to save (may contain _ack/_prompt);
+    event is None (not a lead message), 'reply' or 'handoff'."""
     stage = conv.get("stage") or "answering"
-    f = {k: conv.get(k) for k in list(LEAD_KEYS) + list(COUNTER_KEYS)}
-    f["stage"] = stage
-    event = None
-    caps = []
+    if stage == "intent_detected":
+        stage = "qualifying"
+    if stage == "lead_captured":
+        stage = "routed"
 
-    if stage == "answering" or stage == "routed":
+    f = {k: conv.get(k) for k in LEAD_KEYS + COUNTER_KEYS}
+    f["name_declined"] = conv.get("name_declined") or 0
+    f["loc_asks"] = conv.get("loc_asks") or 0
+    f["name_asks"] = conv.get("name_asks") or 0
+    f["location_confirmed"] = 1 if conv.get("location_confirmed") is None else conv.get("location_confirmed")
+
+    if stage not in ACTIVE:
         if not (quote_request or is_lead_start(text, stage)):
             return None, None
-        for k in LEAD_KEYS:
-            f[k] = None
-        f["name_declined"] = 0
-        f["location_confirmed"] = 1
-        f["loc_asks"] = 0
-        f["name_asks"] = 0
+        f = blank_lead(conv)
         stage = "qualifying"
-        event = "reply"
         if quote_request:
-            f["_prompt"] = "What size and type of cable are you looking for?"
-        else:
-            caps = apply_extraction(f, text, allow_unknown=True)
-            if caps:
-                f["_ack"] = "Noted: " + ", ".join(caps) + "."
-            f["_prompt"] = prompt_for(f)
+            f["stage"] = stage
+            return f, "reply"
 
-    elif stage == "qualifying":
-        event = "reply"
-        product_question = bool(QUESTION_START_RE.match(text) and not START_RE.search(text))
-        caps = [] if product_question else apply_extraction(f, text, allow_unknown=True)
-        if not product_question and (f.get("lead_size") or f.get("lead_need")) and f.get("lead_quantity") and f.get("lead_location"):
-            stage = "confirming"
-            f["_prompt"] = build_confirmation(f)
-        else:
-            f["_prompt"] = prompt_for(f)
-        if caps:
-            f["_ack"] = "Noted: " + ", ".join(caps) + "."
+    caps = []
+    event = "reply"
+    product_question = bool(QUESTION_START_RE.match(text) and not START_RE.search(text))
 
-    elif stage == "confirming":
-        event = "reply"
-        product_question = bool(QUESTION_START_RE.match(text) and not START_RE.search(text))
-        yes = bool(re.search(r"\b(yes|yeah|yep|correct|right|ok|okay|sure|fine)\b", text, re.I))
-        no = bool(re.search(r"\b(no|nope|wrong|incorrect|change|actually)\b", text, re.I))
-        got_name = False
-        caps = [] if product_question else apply_extraction(f, text, allow_unknown=False)
-        changed = bool(caps)
+    if stage == "qualifying":
         if not product_question:
-            nm = name_from_reply(text)
-            if nm == "__declined__":
-                f["name_declined"], got_name = 1, True
-            elif nm:
-                f["lead_name"], got_name = nm, True
-        if changed:
-            pass
-        elif yes or got_name:
-            if name_needed(f):
-                stage = "awaiting_name"
-            else:
-                event = "handoff"
-        elif no:
-            f["_prompt"] = "No problem. What should I change: the size, the length or the location?"
+            caps = apply_extraction(f, text, allow_unknown=True)
+        stage = _next_stage(f)
 
     elif stage == "awaiting_name":
         before = _snapshot(f)
-        product_question = bool(QUESTION_START_RE.match(text) and not START_RE.search(text))
-        caps = [] if product_question else apply_extraction(f, text, allow_unknown=False)
-        if _snapshot(f) != before:
-            stage = "confirming"
-        elif f.get("lead_name"):
-            event = "handoff"
-        else:
+        if not product_question:
+            caps = apply_extraction(f, text, allow_unknown=False)
+        if name_needed(f) and not product_question and _snapshot(f) == before:
             nm = name_from_reply(text)
             if nm == "__declined__":
-                f["name_declined"], event = 1, "handoff"
+                f["name_declined"] = 1
             elif nm:
-                f["lead_name"], event = nm, "handoff"
-            elif not is_question(text):      # a side question is not a failed name attempt
+                f["lead_name"] = nm
+            elif not is_question(text):
                 f["name_asks"] = int(f.get("name_asks") or 0) + 1
                 if f["name_asks"] >= 3:
-                    f["name_declined"], event = 1, "handoff"
+                    f["name_declined"] = 1
+        stage = _next_stage(f)
+
+    elif stage == "confirming":
+        before = _snapshot(f)
+        if not product_question:
+            caps = apply_extraction(f, text, allow_unknown=False)
+        changed = _snapshot(f) != before
+        nxt = _next_stage(f)
+        yes, no = bool(YES_RE.match(text)), bool(NO_RE.match(text))
+        if nxt != "confirming":
+            stage = nxt
+        elif changed:
+            pass
+        elif yes:
+            event = "handoff"
+        elif no:
+            f["_prompt"] = "No problem. What should I change: the name, the size, the length or the location?"
 
     if event == "handoff":
         stage = "routed"
@@ -1072,6 +1331,25 @@ def strip_handoff_language(text):
     for p in patterns:
         text = re.sub(p, "", text).strip()
     return text
+
+
+CONTACT_ASK_RE = re.compile(
+    r"\b(contact|phone|call|e-?mail|whatsapp|address|reach|speak\s+to|talk\s+to|head\s+office|office)\b", re.I)
+CONTACT_SENT_RE = re.compile(
+    r"[^.!?\n]*(?:" + PHONE_RE.pattern + "|" + EMAIL_RE.pattern +
+    r"|whatsapp|call\s+(?:us|the\s+team)|reach\s+(?:out|the\s+cutix\s+team|us)|contact\s+(?:the\s+)?(?:cutix\s+)?team)"
+    r"[^.!?\n]*[.!?]?", re.I)
+NO_DETAIL_REPLY = "I don't have that detail. Tap Request a quote and the team will follow up."
+
+
+def strip_unrequested_contacts(reply, user_message):
+    """Remove contact lines the model adds on its own. Kept when the customer asked for contact details."""
+    if CONTACT_ASK_RE.search(user_message or ""):
+        return reply
+    out = CONTACT_SENT_RE.sub("", reply)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip(" \n")
+    return out if len(out) >= 15 else NO_DETAIL_REPLY
 
 
 # ---------------------------------------------------------------------------
@@ -1319,6 +1597,8 @@ class Handler(BaseHTTPRequestHandler):
             refund(session, ip_hash)
             return text, error, remaining, None
         text, replaced = guard_invented_contacts(text)
+        if not replaced:
+            text = strip_unrequested_contacts(text, message)
         text = strip_handoff_language(text)
         return text, ("invented_contact" if replaced else None), (remaining, ms), None
 
